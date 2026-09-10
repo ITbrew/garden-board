@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# Fast checks only. This runs on every commit, so it has to finish in seconds or it gets bypassed,
+# and a hook people bypass is worse than no hook because it still looks like protection.
+#
+# Anything that needs minutes belongs in pre-push. Anything needing a machine belongs in CI.
+#
+# Installed by `git config core.hooksPath .githooks`, which `npm install` does through the
+# `prepare` script. To skip it deliberately: `git commit --no-verify`.
+
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+fail=0
+step() {
+  printf '  %-28s' "$1"
+  shift
+  if out=$("$@" 2>&1); then
+    echo "ok"
+  else
+    echo "FAILED"
+    echo "$out" | sed 's/^/    /'
+    fail=1
+  fi
+}
+
+echo "pre-commit:"
+
+# Types across all three workspaces. Incremental, so it is fast unless something actually changed.
+step "typecheck" npm run --silent typecheck
+
+# No test may reach the board the owner is working on. See docs/canonical/14-how-tests-are-run.md.
+step "no test touches the board" node scripts/check-no-live-board.mjs
+
+# No credential in what is about to be committed.
+step "no credential staged" node scripts/check-no-secrets.mjs
+
+# Every staged .mjs has to parse. `node --check` costs milliseconds and catches the broken edit
+# that would otherwise only be found by whoever ran that script next, possibly weeks later.
+staged=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.mjs$' || true)
+if [ -n "$staged" ]; then
+  printf '  %-28s' "staged .mjs parse"
+  bad=""
+  for f in $staged; do
+    [ -f "$f" ] || continue
+    if ! err=$(node --check "$f" 2>&1); then
+      bad="$bad\n    $f\n$(echo "$err" | sed 's/^/      /')"
+    fi
+  done
+  if [ -z "$bad" ]; then
+    echo "ok"
+  else
+    echo "FAILED"
+    printf "%b\n" "$bad"
+    fail=1
+  fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo
+  echo "commit refused. Fix the above, or use --no-verify if you know why this is wrong."
+  exit 1
+fi
+
+exit 0

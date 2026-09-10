@@ -1,0 +1,2608 @@
+/* Garden: dark developer-tool aesthetic, tuned for a 37 inch ultrawide.
+   Information density over decoration. The canvas owns the pixels. */
+
+:root {
+  --bg: #070910;
+  --bg-panel: #0b0e16;
+  --bg-raised: #111524;
+  --bg-node: #0e1220;
+  --line: #1c2233;
+  --line-strong: #2a3352;
+  --text: #d5dae6;
+  --text-dim: #7a839c;
+  --text-faint: #4a5268;
+  --accent: #7c5cff;
+  --ok: #2dd4bf;
+  --warn: #f59e0b;
+  --err: #f43f5e;
+  --radius: 6px;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 'Segoe UI', system-ui, sans-serif;
+  overflow: hidden;
+}
+
+.app { display: flex; flex-direction: column; height: 100%; }
+
+/* --- top bar --- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  height: 40px;
+  flex: 0 0 40px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line);
+}
+.brand-mark { display: block; flex: 0 0 auto; }
+.brand { font-weight: 650; letter-spacing: 0.2px; }
+/* Quiet on purpose: a version is something to look up when a build is in question, not something to
+   read every time the board is open. Tabular figures so it does not shift width as it climbs. */
+.brand-version {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  align-self: center;
+}
+.topbar-sub { color: var(--text-faint); font-size: 12px; }
+.spacer { flex: 1; }
+.stat { color: var(--text-dim); font-size: 12px; }
+.conn { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+.conn.is-up { color: var(--ok); border-color: #134e4a; }
+.conn.is-down { color: var(--err); border-color: #4c1d29; }
+
+.banner {
+  padding: 6px 14px;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.banner--error { background: #2a0f18; color: #fda4af; border-bottom: 1px solid #4c1d29; }
+
+/* Amber rather than red: nothing has broken and nothing needs doing, the board is just out of
+   touch and already reconnecting. Red would read as damage. */
+.banner--offline {
+  background: #2b1f06;
+  color: #fcd34d;
+  border-bottom: 1px solid #573f0a;
+  font-weight: 600;
+}
+
+/* --- panel frame --- */
+
+.body { flex: 1; min-height: 0; }
+.pane { min-width: 0; min-height: 0; display: flex; }
+
+.resize-h {
+  width: 4px;
+  background: var(--line);
+  transition: background 120ms;
+}
+.resize-h:hover, .resize-h[data-resize-handle-active] { background: var(--accent); }
+
+.resize-v {
+  height: 4px;
+  background: var(--line);
+  transition: background 120ms;
+}
+.resize-v:hover, .resize-v[data-resize-handle-active] { background: var(--accent); }
+
+/* --- left rail --- */
+
+.rail {
+  width: 100%;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+.rail-section { padding: 12px; border-bottom: 1px solid var(--line); }
+.rail-section--grow { flex: 1; min-height: 0; overflow: auto; }
+/* Takes the leftover height so the sections stay packed at the top of the rail and whatever sits
+   below stays at the bottom, without any one section having to stretch to do it. */
+.rail-spacer { flex: 1; min-height: 0; }
+
+.rail-title {
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.row:hover { background: var(--bg-raised); color: var(--text); }
+.row.is-active { background: var(--bg-raised); color: var(--text); border-color: var(--line-strong); }
+.row-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-count { color: var(--text-faint); font-size: 11px; }
+.swatch { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 8px; }
+/*
+ * Wraps at any character, because what this line most often holds is a path.
+ * A long path is one unbreakable token, so the default wrapping let it run past the rail and the
+ * rail clipped it: the blind reader saw "...Tempgard" on one line and the tail on the next, with
+ * the middle of the path simply missing, and called it a path that does not exist. Breaking mid
+ * word is ugly and losing characters is a lie, so it breaks.
+ */
+.hint { color: var(--text-faint); font-size: 11.5px; padding: 4px 2px; overflow-wrap: anywhere; }
+
+.add-project { display: flex; gap: 6px; margin-top: 10px; }
+.add-project input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 5px 8px;
+  font: 12px/1.4 'Cascadia Mono', Consolas, monospace;
+}
+.add-project input:focus { outline: none; border-color: var(--accent); }
+
+.launchers { display: flex; flex-direction: column; gap: 5px; }
+
+.rail-limits { display: flex; flex-direction: column; gap: 8px; }
+.rail-limit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  cursor: default;
+}
+.rail-limit-row__label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rail-limit-row__label em {
+  font-style: normal;
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+.rail-limit-row input {
+  width: 52px;
+  flex: 0 0 auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 4px 6px;
+  font: 12px/1.2 'Cascadia Mono', Consolas, monospace;
+  text-align: right;
+}
+.rail-limit-row input:focus { outline: none; border-color: var(--accent); }
+/* A figure that is watched rather than capped: same column as the inputs so the rows line up, and
+   deliberately without their box, since there is nothing here to type into. */
+.rail-limit-row__watched {
+  width: 52px;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  padding: 4px 6px;
+  color: var(--text);
+  font: 12px/1.2 'Cascadia Mono', Consolas, monospace;
+  text-align: right;
+}
+
+/* --- buttons --- */
+
+.btn {
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn--wide { width: 100%; text-align: left; }
+.btn--primary { background: #2a2352; border-color: #3d3480; color: #cfc6ff; }
+.btn--primary:hover:not(:disabled) { background: #342c66; color: #fff; }
+.btn--danger:hover:not(:disabled) { color: #fda4af; border-color: #4c1d29; }
+.btn--ghost { background: transparent; border-color: transparent; }
+
+/* --- status dots --- */
+
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; background: var(--text-faint); }
+/* The status dot matches the card it sits on: brighter, and with the same two-step glow, so the
+   header reads as working at a glance rather than only on inspection. */
+.dot--working {
+  background: var(--ok);
+  box-shadow:
+    0 0 8px rgba(45, 212, 191, 0.95),
+    0 0 16px rgba(45, 212, 191, 0.5);
+}
+.dot--starting { background: var(--warn); }
+.dot--needs-input { background: var(--warn); box-shadow: 0 0 6px rgba(245, 158, 11, 0.6); }
+.dot--idle { background: var(--text-dim); }
+.dot--exited { background: var(--text-faint); }
+.dot--failed { background: var(--err); }
+
+/* --- canvas --- */
+
+.canvas { position: relative; flex: 1; min-width: 0; background: var(--bg); display: flex; }
+.canvas-flow { flex: 1; min-width: 0; min-height: 0; }
+.canvas .react-flow__controls button {
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--line);
+  fill: var(--text-dim);
+}
+.canvas .react-flow__minimap { background: var(--bg-panel); }
+
+.canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: var(--text-faint);
+}
+.canvas-empty h2 { margin: 0 0 6px; font-size: 15px; color: var(--text-dim); font-weight: 600; }
+.canvas-empty p { margin: 0; font-size: 12.5px; }
+
+/* --- session node --- */
+
+.node {
+  background: var(--bg-node);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  /* Anchors the working ring, which is absolutely positioned against the card. */
+  position: relative;
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  /* The node fills the cell the canvas assigns it; the preview absorbs the slack. */
+  display: flex;
+  flex-direction: column;
+}
+.node.is-selected { border-color: var(--line-strong); }
+
+/*
+ * A card that is working has its border colour travel around it.
+ *
+ * Motion, not brightness, because a still board full of coloured borders says nothing about which
+ * card is actually mid-turn, and the owner reads this board from across a very wide screen. The
+ * card itself stays fully solid: activity is shown by the edge going round and by the wires
+ * touching it lighting up, never by making the card see-through.
+ *
+ * Drawn as a rotating conic gradient behind the card, masked to a one pixel ring, so the card
+ * body and everything in it are untouched and no layout moves.
+ */
+.node.is-busy::before {
+  content: '';
+  position: absolute;
+  /* Inside the card, not outside it: .node clips to its rounded corners so a ring drawn past the
+     edge would be cut away entirely and nothing would appear to happen. */
+  inset: 0;
+  border-radius: 8px;
+  /* The card's own role colour travels round it, so a working coder, orchestrator and reviewer
+     are told apart by colour while all three are equally obviously busy. */
+  background: conic-gradient(
+    from var(--spin, 0deg),
+    var(--role-color, var(--accent)) 0deg,
+    #ffffff 25deg,
+    #ffffff 70deg,
+    var(--role-color, var(--accent)) 120deg,
+    transparent 215deg,
+    transparent 330deg,
+    var(--role-color, var(--accent)) 360deg
+  );
+  /* Ring only: the middle is punched out so nothing paints over the card. */
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  /* Three pixels, not one and a half. The ring was legible on the card and invisible from the
+     other side of the screen, which is where this board is actually read from. */
+  padding: 3px;
+  animation: node-spin 2.4s linear infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+.node.is-busy > * { position: relative; z-index: 1; }
+
+/*
+ * A second layer, outside the card: the role colour breathing around it.
+ *
+ * It cannot be a pseudo-element. `.node` sets `overflow: hidden` so its rounded corners hold the
+ * preview, and that clips a child's shadow away entirely; an element's own box-shadow is not
+ * clipped by its own overflow, so the glow belongs on `.node` itself. The card keeps its ordinary
+ * lift (the black drop shadow) inside the same animation, because an animated `box-shadow`
+ * replaces the property outright and dropping the lift would make a busy card look flat.
+ *
+ * Breathing rather than steady, on a slow two second ease, so that a board of several working cards
+ * is still one signal and not a wall of light. Nothing inside the card moves and the body stays
+ * solid, which is the rule the ring already follows.
+ */
+.node.is-busy { animation: node-breathe 2s ease-in-out infinite; }
+
+@keyframes node-breathe {
+  0%, 100% {
+    box-shadow:
+      0 6px 20px rgba(0, 0, 0, 0.45),
+      0 0 8px var(--role-color, var(--accent));
+  }
+  50% {
+    box-shadow:
+      0 6px 20px rgba(0, 0, 0, 0.45),
+      0 0 22px var(--role-color, var(--accent));
+  }
+}
+
+/*
+ * Busy and focused at once has to read as both.
+ *
+ * A CSS animation beats a normal declaration in the cascade, so the breathing above would quietly
+ * eat the focused card's accent ring and leave no way to tell which card the terminal below belongs
+ * to. This says both in one animation instead: the focus ring stays exactly as `.is-focused` draws
+ * it, with the same breath around it.
+ */
+.node.is-busy.is-focused { animation: node-breathe-focused 2s ease-in-out infinite; }
+
+@keyframes node-breathe-focused {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px var(--accent),
+      0 6px 24px rgba(124, 92, 255, 0.25),
+      0 0 8px var(--role-color, var(--accent));
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px var(--accent),
+      0 6px 24px rgba(124, 92, 255, 0.25),
+      0 0 22px var(--role-color, var(--accent));
+  }
+}
+
+/* A reader who has asked for less motion gets the glow held at its bright end rather than
+   breathing, so the signal is not weaker for them. The travelling ring is left as it was before
+   this change; it is not mine to quietly settle here. */
+@media (prefers-reduced-motion: reduce) {
+  .node.is-busy {
+    animation: none;
+    box-shadow:
+      0 6px 20px rgba(0, 0, 0, 0.45),
+      0 0 22px var(--role-color, var(--accent));
+  }
+  .node.is-busy.is-focused {
+    animation: none;
+    box-shadow:
+      0 0 0 1px var(--accent),
+      0 6px 24px rgba(124, 92, 255, 0.25),
+      0 0 22px var(--role-color, var(--accent));
+  }
+}
+
+@property --spin {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes node-spin {
+  to { --spin: 360deg; }
+}
+
+/* A browser without registered custom properties cannot animate the gradient angle, so the ring
+   rotates as a whole element instead. Same signal, one fewer moving part. */
+@supports not (background: conic-gradient(from var(--spin, 0deg), red, blue)) {
+  .node.is-busy::before { animation: node-spin-fallback 2.4s linear infinite; }
+  @keyframes node-spin-fallback {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+}
+
+.node.is-focused { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 6px 24px rgba(124, 92, 255, 0.25); }
+/*
+ * A card that is off reads as quieter, never as see-through.
+ *
+ * This used to drop the whole card's opacity, which let every wire behind it show through the
+ * card body. Dimming the text and the border says the same thing without turning the card into
+ * a window: nothing on this board should have a line running visibly through it.
+ */
+.node.is-dead { color: var(--text-dim); border-color: var(--line); }
+.node.is-dead .node-body,
+.node.is-dead .term-mini { filter: saturate(0.55) brightness(0.8); }
+
+.node-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  background: var(--bg-raised);
+  border-top: 2px solid var(--accent);
+  border-bottom: 1px solid var(--line);
+}
+/* min-width: 0 is load-bearing: without it a flex item will not shrink below its own content
+   size, so a long status pill next to the title pushes the row wider instead of the title
+   ellipsizing, and the title reads as one clipped letter. */
+.node-title { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/*
+ * A file card shows its whole name, even a long one.
+ *
+ * A session's title is a label the owner chose and can be shortened without losing much. A file's
+ * name is the thing that identifies it, and a web of twenty files where half of them read
+ * "CLAUDE.m..." is a web that cannot be used. So a document title wraps onto a second line rather
+ * than being cut, and the header grows to fit it.
+ */
+.node--doc .node-title {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.25;
+  word-break: break-word;
+}
+.node--doc .node-head { align-items: flex-start; min-height: 0; }
+.node-status { color: var(--text-faint); font-size: 11px; flex: 0 0 auto; white-space: nowrap; }
+
+.node-meta { display: flex; flex-wrap: wrap; gap: 4px; padding: 7px 9px 4px; }
+.chip {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.chip--muted { color: var(--text-faint); }
+
+.node-preview {
+  margin: 6px 9px 8px;
+  padding: 7px 8px;
+  background: #06080e;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  /* 11.5px was called near-illegible by a blind reviewer on a 4K display. The card stays
+     small; the text inside it does not have to be. */
+  font: 12.5px/1.45 'Cascadia Mono', Consolas, monospace;
+  color: #b3bcd1;
+  flex: 1;
+  min-height: 90px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  /* The pane shows the tail of the stream, so the top line is usually cut. A blind reviewer
+     read that as broken rather than as scrolled. Fading the top edge says "more above". */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+}
+.node-preview__line { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.node-preview--empty { color: var(--text-faint); justify-content: center; align-items: center; }
+
+.node-actions {
+  display: flex;
+  gap: 4px;
+  padding: 0 9px 9px;
+}
+.node-actions .btn { flex: 1; text-align: center; padding: 4px 4px; font-size: 11px; }
+
+.node-pin {
+  /* Round at every card size: React Flow's own handle style is a square with a radius, and a
+     flex parent could squash it, so the shape is pinned here rather than left to the layout. */
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  min-width: 9px;
+  min-height: 9px;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  background: var(--bg-raised);
+  border: 1.5px solid var(--line-strong);
+}
+.node-pin:hover { border-color: var(--accent); }
+
+/* --- terminal dock --- */
+
+.dock { flex: 1; min-width: 0; display: flex; background: var(--bg-panel); border-top: 1px solid var(--line); }
+.dock-pane { display: flex; flex-direction: column; min-width: 0; }
+.dock-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.dock-title { font-weight: 600; }
+.dock-cwd {
+  flex: 1;
+  color: var(--text-faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.term-host { flex: 1; min-height: 0; padding: 4px 6px; background: #0b0d12; overflow: hidden; }
+.term-surface { height: 100%; width: 100%; }
+.term-host .xterm { height: 100%; }
+
+/* --- collapsing, doc cards, and the doc picker --- */
+
+.twisty {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.twisty:hover { color: var(--text); }
+
+.node--doc { border-color: #1d2a3a; }
+.node-head--doc { background: #101826; }
+.doc-icon {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #7cc4ff;
+  border: 1px solid #21384f;
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.doc-path {
+  padding: 4px 10px 0;
+  font: 10.5px/1.3 'Cascadia Mono', Consolas, monospace;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.doc-body {
+  margin: 6px 10px 10px;
+  padding: 8px 10px;
+  background: #06080e;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  flex: 1;
+  min-height: 60px;
+  overflow: auto;
+  font-size: var(--card-font, 12.5px);
+  line-height: 1.55;
+  color: #c2cadb;
+}
+.doc-body--empty { color: var(--text-faint); }
+.doc-body h1, .doc-body h2, .doc-body h3, .doc-body h4 {
+  margin: 10px 0 5px;
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.3;
+}
+.doc-body h1 { font-size: 14px; }
+.doc-body h2 { font-size: 13px; }
+.doc-body p, .doc-body ul, .doc-body ol { margin: 0 0 8px; }
+.doc-body ul, .doc-body ol { padding-left: 18px; }
+.doc-body code {
+  font: 10.5px/1.4 'Cascadia Mono', Consolas, monospace;
+  background: #10141f;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.doc-body pre {
+  background: #10141f;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 7px 9px;
+  overflow-x: auto;
+  margin: 0 0 8px;
+}
+.doc-body pre code { background: none; border: none; padding: 0; }
+.doc-body table { border-collapse: collapse; margin: 0 0 8px; font-size: 11px; }
+.doc-body th, .doc-body td { border: 1px solid var(--line); padding: 3px 7px; text-align: left; }
+.doc-body th { background: var(--bg-raised); }
+.doc-body a { color: #7cc4ff; }
+.doc-body blockquote {
+  margin: 0 0 8px;
+  padding-left: 9px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--text-dim);
+}
+.doc-body img { max-width: 100%; }
+.doc-body hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
+
+.filter {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 4px 7px;
+  margin-bottom: 6px;
+  font: 11.5px/1.4 'Segoe UI', system-ui, sans-serif;
+}
+.filter:focus { outline: none; border-color: var(--accent); }
+.filter:disabled { opacity: 0.4; }
+
+.list--scroll { max-height: 210px; overflow-y: auto; }
+.row-label--rtl { direction: rtl; text-align: left; font-size: 11.5px; }
+
+/* --- context menu --- */
+
+.ctxmenu {
+  position: fixed;
+  z-index: 60;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.6);
+  font-size: 12.5px;
+  animation: ctx-in 90ms ease-out;
+}
+@keyframes ctx-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.ctxmenu--sub {
+  position: absolute;
+  left: 100%;
+  top: -5px;
+  margin-left: 2px;
+}
+.ctxmenu__item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctxmenu__item:hover { background: #1a2033; color: var(--text); }
+.ctxmenu__item.is-disabled { opacity: 0.35; cursor: not-allowed; }
+.ctxmenu__item.is-disabled:hover { background: none; color: var(--text-dim); }
+.ctxmenu__item.is-danger { color: #fda4af; }
+.ctxmenu__item.is-danger:hover { background: #2a0f18; color: #fecdd3; }
+.ctxmenu__label { flex: 1; }
+.ctxmenu__hint { color: var(--text-faint); font-size: 10.5px; }
+.ctxmenu__arrow { color: var(--text-faint); }
+.ctxmenu__sep { height: 1px; background: var(--line); margin: 4px 6px; }
+
+/* A wire pulses only while a real event is travelling along it right now (wire.pulse), never as
+   a standing state. Every wire kind already draws some dash pattern of its own (blind, derived,
+   context), so a dash change alone was not distinguishable from the wire's normal look in a
+   still image. The pulse has to win on colour and glow too, both applied inline in WireEdge.tsx
+   so the glow colour matches the pulse stroke exactly rather than an inherited `currentColor`
+   that may not. This class only supplies the motion, which reads once the page is live. */
+.wire-pulse {
+  animation: wire-travel 500ms linear infinite;
+}
+@keyframes wire-travel {
+  from { stroke-dashoffset: 24; }
+  to { stroke-dashoffset: 0; }
+}
+
+/* --- labelled ports --- */
+
+.port { position: absolute; display: flex; align-items: center; pointer-events: none; }
+.port > * { pointer-events: auto; }
+.port--left { left: -5px; top: 50%; transform: translateY(-50%); }
+.port--right { right: -5px; top: 50%; transform: translateY(-50%); }
+.port--top { left: 50%; top: -6px; transform: translateX(-50%); flex-direction: column; }
+.port--bottom { left: 50%; bottom: -6px; transform: translateX(-50%); flex-direction: column-reverse; }
+
+.port-dot {
+  /*
+   * A blip is a circle at every card size, always.
+   *
+   * These sit in a flex row beside their label, and a flex item is free to be squeezed along the
+   * main axis, so a narrow or short card was flattening the dot into an oval. Fixing the basis
+   * and refusing to shrink keeps it round no matter what the card is doing.
+   */
+  width: 11px;
+  height: 11px;
+  flex: 0 0 11px;
+  min-width: 11px;
+  min-height: 11px;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  background: var(--bg-raised);
+  border: 1.5px solid var(--line-strong);
+  cursor: pointer;
+  transition: border-color 120ms, box-shadow 120ms;
+}
+.port-dot--history:hover { border-color: var(--ok); box-shadow: 0 0 8px rgba(45, 212, 191, 0.5); }
+.port-dot--context:hover { border-color: #7cc4ff; box-shadow: 0 0 8px rgba(124, 196, 255, 0.5); }
+
+/* The label is the interface explaining itself: it slides out of the port on hover. */
+.port-label {
+  position: absolute;
+  padding: 3px 8px;
+  background: #131a2b;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 130ms ease, transform 130ms ease;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.port-label--left { right: -10px; bottom: 26px; transform: translateY(5px); }
+.port-label--right { left: -10px; bottom: 26px; transform: translateY(5px); }
+.port-label--top { bottom: 18px; transform: translateY(6px); }
+.port-label--bottom { top: 18px; transform: translateY(-6px); }
+.port:hover .port-label { opacity: 1; transform: none; }
+
+/* --- status colours --- */
+
+.dot--done { background: #38bdf8; }
+.dot--stopped { background: var(--text-faint); }
+.node-status--needs-input { color: var(--warn); font-weight: 600; }
+.node-status--working { color: var(--ok); }
+.node-status--failed { color: var(--err); }
+.node-status--done { color: #7cc4ff; }
+/*
+ * A card that is off is quieter, never see-through.
+ *
+ * This was the last opacity left on a card, and it was the one the owner kept hitting: a shell
+ * that has been turned off is the most common state on a busy board, and dropping its opacity let
+ * every wire behind it show through the card body and through its own text. No card on this board
+ * is ever transparent. Being off is said with colour instead.
+ */
+.node.is-off {
+  background: var(--bg-node);
+  border-color: var(--line);
+  color: var(--text-dim);
+}
+.node.is-off .node-head { background: var(--bg);
+  border-top-color: var(--text-faint);
+}
+.node.is-off .term-mini,
+.node.is-off .node-body { filter: saturate(0.5) brightness(0.82); }
+
+/* The header pill: just the short word, so it never competes with the title for space. A coloured
+   word alone was not enough to catch at a distance, so it also gets a slow pulse. */
+.node-status--alert {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  animation: alert-pulse 1.6s ease-in-out infinite;
+}
+@keyframes alert-pulse {
+  0%, 100% { box-shadow: 0 0 0 rgba(245, 158, 11, 0); }
+  50% { box-shadow: 0 0 9px rgba(245, 158, 11, 0.55); }
+}
+
+/* The one thing the owner has to be able to spot across a full board: which card is blocked on
+   him, why, and for how long. It gets a full-width row of its own, below the header, so a long
+   reason string never crowds the title out of the header row above it. */
+.node-alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 9px;
+  background: rgba(245, 158, 11, 0.14);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+  font-size: 11.5px;
+  color: var(--warn);
+}
+.node-alert__headline { font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; font-size: 10.5px; }
+.node-alert__reason { color: var(--text); }
+.node-alert__since { color: var(--text-dim); margin-left: auto; }
+
+/* Says what a card is, since an agent card has no PTY of its own to point at. */
+.chip--kind { color: #c4b5fd; border-color: #3d3480; text-transform: capitalize; }
+
+/* What an agent card shows instead of a terminal it does not have. A pane that always says "no
+   output yet" reads as broken; this reads as what the card actually is. */
+.agent-summary {
+  margin: 6px 9px 8px;
+  padding: 8px 9px;
+  background: #06080e;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  /* Follows the card's own text size, so ctrl and the wheel size a conversation the same way they
+     already size a terminal miniature. It was pinned at 12px and did not move with the rest of the
+     card, which a reviewer reading a full one called small. */
+  font-size: calc(var(--card-font, 11px) + 3px);
+}
+.agent-summary__row { display: flex; gap: 8px; }
+.agent-summary__row--muted { color: var(--text-faint); font-style: italic; }
+.agent-summary__label { color: var(--text-faint); min-width: 56px; flex: 0 0 auto; }
+
+/*
+ * A hairline between turns, because without one a wrapped turn reads as a new one.
+ *
+ * A blind reviewer given a card full of real turns reported command lines "cut off mid-word" and one
+ * line with no label at all. Measured from the DOM, nothing was clipped: every row's scrollWidth
+ * equalled its clientWidth and the pane had no horizontal overflow. What they were actually seeing
+ * was the second line of a wrapped turn, which with no boundary above or below it looks like an
+ * entry whose label is missing. The complaint was right and the diagnosis was wrong, which is what
+ * a reviewer who can only see the picture is for.
+ */
+.agent-summary__row + .agent-summary__row {
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+.agent-summary--dock .agent-summary__row + .agent-summary__row { padding-top: 10px; }
+
+/* The same conversation at 1:1 in the dock, where there is room to read it properly. Bigger text and
+   a wider gutter, and rows spaced far enough apart that a long answer does not read as one block. */
+.agent-summary--dock {
+  margin: 0;
+  padding: 10px 14px;
+  border: none;
+  border-radius: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  gap: 10px;
+  min-height: 0;
+}
+.agent-summary--dock .agent-summary__label {
+  min-width: 64px;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding-top: 2px;
+}
+
+/* A real affordance, not a dead icon: opens the transcript as a document card. It is a <button>
+   wearing the .chip look, so it needs the chip's own reset rather than inheriting one. */
+.chip--transcript {
+  color: var(--text-dim);
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+.chip--transcript:hover { color: var(--text); border-color: var(--line-strong); }
+
+/* --- terminal miniature ---------------------------------------------------
+   A real window onto the session's screen, drawn from its own buffer with its own colours.
+   It clips rather than wraps: a terminal is 100+ columns and a small card is not, so the card
+   shows the left of the terminal and widening it shows more. */
+
+.mini {
+  margin: 6px 9px 8px;
+  padding: 6px 7px;
+  background: #06080e;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  flex: 1;
+  min-height: 80px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  /* Line height is a whole number of pixels and TerminalMini divides by it, so a card only ever
+     shows complete rows. A fractional line height brought back the sliced top line. */
+  /* Follows the card's own size, set with ctrl and the wheel. The line height tracks it so
+     TerminalMini still shows whole rows rather than slicing one through the middle. */
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: var(--card-font, 11px);
+  line-height: calc(var(--card-font, 11px) + 4px);
+  color: #b3bcd1;
+  contain: paint;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent 100%);
+}
+.mini--empty {
+  justify-content: center;
+  align-items: center;
+  color: var(--text-faint);
+  font-style: italic;
+}
+.mini-grid { min-width: 0; }
+
+/*
+ * The scrollbar for a card's terminal miniature.
+ *
+ * Drawn rather than native, because there is nothing for a native one to scroll: the pane renders
+ * only the rows it can fit and reads a different window out of the session's own terminal buffer
+ * when the owner moves, so there is no tall element underneath to overflow. The bar is therefore a
+ * position indicator that can also be grabbed, which is the same thing a real scrollbar is.
+ *
+ * `.mini` is `position: relative` for this, and the bar sits inside its padding rather than taking
+ * width from the text, so turning it on does not reflow the terminal content underneath and change
+ * how many columns a card shows.
+ */
+.mini { position: relative; }
+/*
+ * Wider and brighter than the first attempt, which a blind reviewer could not see at all: asked
+ * what was on the right-hand edge of the pane it answered that the edge looked plain and empty. A
+ * 5px track at 5% white on a near-black pane is invisible at the size a card is actually drawn.
+ * The thumb now carries a real colour rather than a hairline one, since it is a control rather
+ * than a decoration.
+ */
+.mini-scroll {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  right: 2px;
+  width: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+}
+/*
+ * The thumb has to out-contrast the track by a wide margin, or the pair reads as one uniform sliver
+ * and stops saying anything about position, which is the only job it has. A reviewer shown the
+ * first version described a single light strip running most of the panel's height: that was the
+ * track, and the thumb sitting inside it was not distinguishable from it.
+ */
+.mini-scroll__thumb {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  border-radius: 4px;
+  background: #aab4cc;
+  cursor: grab;
+}
+.mini-scroll__thumb:hover { background: var(--text-dim); }
+.mini-scroll__thumb:active { cursor: grabbing; }
+
+/*
+ * Shown only while the pane is held above the live end. A card stuck part-way up its own history
+ * is indistinguishable from a card whose session has gone quiet, and this pane has been misread
+ * once already for want of a word.
+ */
+/*
+ * In the row the pane gives up while scrolled, not floating over the text.
+ *
+ * It was absolutely positioned over the bottom line, and a blind reviewer read that line as "line
+ * 118 of the scrol..." with this label sitting on the rest of it. A notice about the output that
+ * covers the output is self-defeating; TerminalMini draws one row fewer while this is up, so the
+ * pane's height does not change and nothing on the board moves.
+ */
+.mini-follow {
+  align-self: flex-end;
+  margin: 1px 12px 0 0;
+  flex: 0 0 auto;
+  padding: 0 6px;
+  font: inherit;
+  font-size: 9.5px;
+  color: var(--text-dim);
+  background: #0b0d12;
+  border: 1px solid var(--line-strong, #39415a);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.mini-follow:hover { color: var(--text); border-color: var(--accent, #7c5cff); }
+.mini-row {
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: clip;
+  height: calc(var(--card-font, 11px) + 4px);
+}
+
+/* --- wires ---------------------------------------------------------------- */
+
+/*
+ * Wires run behind cards, never across them.
+ *
+ * A card is a solid object on this board: a wire that shows through one makes it ambiguous which
+ * cards a line actually connects, which is the one thing a wire exists to say. The node layer is
+ * lifted above the edge layer explicitly rather than relying on paint order, because React Flow
+ * assigns its own inline z-index to nodes and the two can end up level.
+ */
+/*
+ * Lift the whole node layer, not the individual nodes.
+ *
+ * A z-index on a single node only competes inside its own container, so it says nothing about
+ * whether the nodes layer paints above the edges layer. React Flow puts both in the viewport as
+ * siblings, and the edges container carries a z-index of its own, so the only reliable way to
+ * keep every wire behind every card is to rank the two containers against each other.
+ */
+.react-flow__edges { z-index: 0 !important; }
+.react-flow__edgelabel-renderer { z-index: 1 !important; }
+.react-flow__nodes { z-index: 5 !important; }
+.react-flow__node { z-index: 3; }
+
+.react-flow__edge-path { stroke-linecap: round; }
+.react-flow__edge:hover .react-flow__edge-path { filter: brightness(1.35); }
+.react-flow__edge.selected .react-flow__edge-path { filter: brightness(1.5); }
+
+.wire-label {
+  position: absolute;
+  padding: 2px 7px;
+  background: #111524;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: all;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+/* A small anchor dot under the pill, so a label sitting in open canvas space (its wire's true
+   midpoint, which can land well away from either card once the wire bows around something) still
+   reads as tied to the line beneath it rather than as a floating, unrelated chip. */
+.wire-label::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  transform: translateX(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+/* In-place markdown editing, so a file opened on the board can be changed on the board. */
+.doc-edit {
+  margin: 6px 10px 10px;
+  padding: 8px 10px;
+  flex: 1;
+  min-height: 60px;
+  resize: none;
+  background: #06080e;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: #c2cadb;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: var(--card-font, 12px);
+  line-height: 1.5;
+  outline: none;
+  overflow: auto;
+}
+
+/* The context dot is a button: it unfolds the files a session runs from, and folds them away. */
+button.port-dot {
+  padding: 0;
+  appearance: none;
+}
+.port-dot--context.is-open {
+  background: #7cc4ff;
+  border-color: #7cc4ff;
+  box-shadow: 0 0 9px rgba(124, 196, 255, 0.65);
+}
+.node--doc.is-web { border-color: #23384f; }
+
+/* --- project tabs ---------------------------------------------------------
+   One tab per project. The account on the tab is the account every session inside it runs on,
+   enforced by the server, because two accounts billed separately must never blur together. */
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 8px;
+  height: 34px;
+  flex: 0 0 34px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab:hover { background: var(--bg-panel); color: var(--text); }
+.tab.is-active {
+  background: var(--bg-panel);
+  border-color: var(--line);
+  color: var(--text);
+}
+.tab--add { color: var(--text-faint); font-size: 15px; padding: 0 12px; }
+.tab-swatch { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 8px; }
+.tab-name { font-weight: 600; }
+.tab-count {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  background: var(--bg-raised);
+  border-radius: 999px;
+  padding: 0 5px;
+}
+.tab-account {
+  font-size: 10.5px;
+  color: #7cc4ff;
+  border: 1px solid #21384f;
+  border-radius: 999px;
+  padding: 1px 7px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tab-account:hover { background: #10233a; }
+.tab-account.is-unset { color: var(--warn); border-color: #4a3410; }
+
+.tab-add { display: flex; align-items: center; padding: 0 6px; }
+.tab-add input {
+  background: var(--bg-panel);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--text);
+  padding: 3px 8px;
+  font: 12px 'Cascadia Mono', Consolas, monospace;
+  outline: none;
+  width: 260px;
+}
+
+/* Step two of opening a tab. The workspace stays empty until the account is settled, because
+   the two accounts are billed separately and a wrong default costs real money. */
+.acctbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  flex: 0 0 auto;
+  background: #16120a;
+  border-bottom: 1px solid #4a3410;
+  font-size: 12.5px;
+  color: #fcd9a0;
+}
+.acctbar-label strong { color: #fff; }
+.acctbar-hint { color: #a0894f; font-size: 11.5px; margin-left: auto; }
+
+/* Undo/redo for board edits. Session deletion is deliberately not undoable: it ends a real
+   process and removes history, so offering to undo it would be a lie. */
+.undobar { display: flex; align-items: center; gap: 4px; margin-left: 14px; }
+.undobar-toast {
+  margin-left: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 9px;
+  animation: ctx-in 120ms ease-out;
+}
+
+/* The account a session spends on, shown on its card. Read from the config dir the process was
+   launched with, so it is exact rather than inferred. */
+.chip--account { color: #7cc4ff; border-color: #21384f; }
+.chip--unknown { color: var(--warn); border-color: #4a3410; }
+
+/* Editing a file on the board. A save with no feedback leaves you unsure it wrote anything. */
+.doc-dirty {
+  font-size: 10.5px;
+  color: var(--warn);
+  border: 1px solid #4a3410;
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.doc-saved {
+  font-size: 10.5px;
+  color: var(--ok);
+  border: 1px solid #134e4a;
+  border-radius: 999px;
+  padding: 1px 7px;
+  animation: ctx-in 120ms ease-out;
+}
+
+/*
+ * The two states a save badge used to have no way to say.
+ *
+ * A write that has been sent and not answered is not a success and not a failure, and the whole
+ * point of this project is that it must not be drawn as either. It gets a dashed outline, because
+ * a broken line is the one border that reads as provisional at a glance, and a colour that is
+ * neither the teal of a confirmed write nor the amber of unsaved work.
+ *
+ * A refused write gets the error colour and a filled ground, so it does not read as the same
+ * ordinary amber pill as "unsaved". Those two meant very different things and looked identical:
+ * one says your work is not written yet, the other says the file rejected it.
+ */
+.doc-unknown {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.doc-failed {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #ffe4e9;
+  background: #7f1d2e;
+  border: 1px solid var(--err);
+  border-radius: 999px;
+  padding: 1px 7px;
+  animation: ctx-in 120ms ease-out;
+}
+
+/* Role and team colour coding. The card's top border carries it so a board reads at a glance
+   even when every card is compacted to its header. */
+.chip--role { font-weight: 600; }
+.node-head { border-top-width: 3px; }
+
+/* Image cards. A screenshot a reviewer looked at should be openable where the work is, not only
+   findable on disk. */
+.doc-image {
+  margin: 6px 10px 10px;
+  flex: 1;
+  min-height: 60px;
+  overflow: auto;
+  background: #06080e;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-in;
+}
+.doc-image img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+.doc-icon--img { color: #a3e635; border-color: #3f5320; }
+
+/* The top and bottom handles anchor wires but are not dragged from: those webs open by clicking
+   the dot, so the handle ignores the pointer and the button underneath takes the click. */
+.node-pin--ghost {
+  opacity: 0;
+  pointer-events: none;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  border: none;
+}
+
+/* The miniature fills whatever height the card's size step gives it. */
+.mini-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+/* Context gauge: a vertical bar just outside the card, readable from across the workspace.
+   Empty and hatched when Garden has no real number, because a guessed context gauge is worse
+   than none: the only reason to look at it is to decide whether a session is too full.
+
+   Unknown is the ORDINARY state here, not a rare edge case: the CLI only writes its token count
+   into the transcript well after a turn ends, so most sessions sit with contextUsed null for
+   most of their life. A dashed outline reads as "empty track, nothing published yet" rather than
+   as a rendering failure the way a plain missing box would; a solid unbroken bar is what should
+   look unusual, because that is the one that has real data in it. */
+.ctxbar {
+  position: absolute;
+  left: -14px;
+  top: 6px;
+  bottom: 6px;
+  width: 7px;
+  border-radius: 4px;
+  background: #10141f;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column-reverse;
+}
+.ctxbar.is-unknown {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: repeating-linear-gradient(
+    45deg,
+    #10141f,
+    #10141f 3px,
+    #1c2333 3px,
+    #1c2333 6px
+  );
+}
+.ctxbar-fill { width: 100%; background: var(--ok); transition: height 400ms ease; }
+.ctxbar-fill.is-mid { background: var(--warn); }
+.ctxbar-fill.is-high { background: var(--err); }
+
+/* A real terminal line under each card. What is typed goes to the PTY exactly as written, so a
+   prompt answer, a slash command and a shell command all behave the same as in the full
+   terminal. Nothing here interprets or rewrites the input. */
+.node-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 9px 6px;
+  padding: 3px 7px;
+  background: #06080e;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.node-input:focus-within { border-color: var(--accent); }
+.node-input__caret { color: var(--accent); font-weight: 700; }
+.node-input input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: var(--card-font, 11.5px);
+}
+.node-input input::placeholder { color: var(--text-faint); }
+.node-input input:disabled { color: var(--text-faint); }
+
+/* Two header controls on every card, and they must not look alike: the chevron shows or hides
+   the contents, the minus steps the card back down. Deleting is never a header button. */
+.twisty {
+  min-width: 18px;
+  text-align: center;
+  border-radius: 3px;
+}
+.twisty:hover { background: var(--bg-raised); color: var(--text); }
+
+/*
+ * A toggle that is currently on: ringed, not filled.
+ *
+ * Two blind passes shaped this. The first saw the icon swap for a different glyph when pressed and
+ * could not tell what the replacement meant or whether pressing it again was the way back, so it
+ * became one icon with a state. The second saw that state as a filled accent circle and reported "a
+ * solid glossy violet orb" with no glyph in it at all: the icon is an emoji, emoji carry their own
+ * colours, so `color: #fff` does nothing and a saturated fill behind one simply swallows it.
+ *
+ * So the fill is a ring instead. The glyph keeps the dark background it is legible against, which is
+ * where the first reviewer read it correctly as a speech bubble, and the accent outline is what says
+ * the toggle is on.
+ */
+.twisty--on {
+  background: var(--bg-raised);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--accent);
+}
+.twisty--on:hover { background: var(--bg-raised); color: var(--accent); }
+
+/* A word rather than a glyph, for the controls where no icon survives being 11px in a card header.
+   Padded a little wider than the icon buttons so the text is not touching its own ring. */
+.twisty--word {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  padding: 1px 5px;
+  min-width: 0;
+}
+
+/* Drag an edge or corner to size a card exactly. Only shown on the selected card, so the board
+   is not covered in handles, and deliberately obvious once it is. */
+.card-resize-line { border-color: var(--accent); border-width: 1.5px; }
+.card-resize-handle {
+  width: 9px;
+  height: 9px;
+  background: var(--accent);
+  border: 1.5px solid #0b0d12;
+  border-radius: 2px;
+}
+
+/* Every wire lands on a visible dot rather than a bare edge, so where a connection attaches is
+   never a guess. The two under the fold dots stay invisible because the dot itself is drawn on
+   top of them and takes the click. */
+.node-pin--small { width: 7px; height: 7px; border-width: 1.5px; }
+.node-pin--under { opacity: 0; pointer-events: none; width: 11px; height: 11px; flex: 0 0 11px; }
+/* The second handle on a side sits exactly under the first: one visible dot, two directions. */
+.node-pin--stacked { opacity: 0; pointer-events: none; }
+
+/* Which column of the context web a card belongs to. On the card rather than as a floating
+   header, so it cannot be dragged away from the cards it labels. */
+.doc-group {
+  font-size: 9.5px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+/* A floating label above a column of the context web. Not a card: it names the column rather
+   than belonging to it, so it cannot be dragged, selected or wired. */
+.colhead {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px;
+  background: #131a2b;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.colhead.is-always { color: #9fb4d8; border-color: #2a3a56; }
+
+/*
+ * A column that has not been opened yet, and is therefore a control rather than a label.
+ *
+ * The base rule sets `pointer-events: none`, which is right for a header that describes a column of
+ * cards and would otherwise sit in front of them. This one has to be clickable, so it takes the
+ * pointer back, and it is drawn as something pressable so the difference is visible rather than
+ * discovered.
+ */
+.colhead--pick {
+  pointer-events: auto;
+  cursor: pointer;
+  font-family: inherit;
+  background: #182238;
+  color: var(--text);
+  transition: background 120ms, transform 120ms;
+}
+.colhead--pick:hover { background: #22304e; transform: translateY(-1px); }
+.colhead--pick:active { transform: translateY(0); }
+
+/*
+ * A column that is in play every session is the emphasised one, and it took a blind pass to notice
+ * this was backwards.
+ *
+ * `.is-always` marks instructions, notes, settings, hooks and guards: the things a session reads
+ * whatever it does, as against skills and agent definitions which do nothing until something invokes
+ * them. Giving every pill the accent border put the accent on all of them, and `.is-always` then
+ * overrode it with its own dimmer colour, so the columns that always apply ended up looking weaker
+ * than the ones that sometimes do. The reviewer read the highlight as meaning something and could
+ * not work out what: "with two items simultaneously marked this way, it doesn't read like a normal
+ * single-active-tab pattern, and nothing on screen explains what the highlight means."
+ */
+.colhead--pick.is-always {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.colhead--pick:not(.is-always) {
+  border-color: var(--line-strong);
+  color: var(--text-dim);
+}
+
+/*
+ * One width for every pill, because they are a table header row.
+ *
+ * Sized to the column of files that opens beneath, so a pill sits squarely over its own rows.
+ * Pills sized to their own labels made a ragged row of blocks: "all roots pills should be same size."
+ */
+.colhead--wide {
+  width: 260px;
+  box-sizing: border-box;
+  justify-content: space-between;
+}
+
+/* A column that is currently open. Same pill, plus the way back. */
+.colhead--pick.is-open { background: #0f1626; }
+.colhead-fold { color: var(--text-faint); font-size: 9px; margin-left: 1px; }
+.colhead--pick.is-open:hover .colhead-fold { color: var(--text); }
+.colhead-label { font-weight: 700; }
+.colhead-count {
+  color: var(--text-faint);
+  background: var(--bg);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+
+/* --- the boundary around an open web --- */
+
+/*
+ * One border around a session's files, and another around its history.
+ *
+ * A web arrives as twenty or more cards, and without a boundary those read as twenty things that
+ * happen to be near each other rather than one group belonging to one card. The frame is drawn
+ * behind them, so it never takes a click meant for a file, and it carries the only control that
+ * folds the whole group away.
+ */
+.webframe {
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  background: rgba(124, 196, 255, 0.035);
+  pointer-events: none;
+}
+.webframe--history { background: rgba(192, 132, 252, 0.04); }
+
+.webframe__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  /* Only the header takes the pointer: the body has to stay transparent to clicks so the cards
+     inside it remain reachable. */
+  pointer-events: auto;
+  /* And it is the handle the whole block is dragged by, so it says so. */
+  cursor: grab;
+}
+.webframe__head:active { cursor: grabbing; }
+.webframe__title { font-weight: 600; }
+.webframe__count {
+  color: var(--text-faint);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10.5px;
+}
+.webframe__fold {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  padding: 0 2px;
+}
+.webframe__fold:hover { color: var(--text); }
+
+/* The model a session is running, called out from the other chips because it is the one that
+   decides what a turn costs. */
+.chip--model { color: #7cc4ff; border-color: #24405c; }
+
+/* A round header control, for the pencil: circular so it reads as an edit affordance rather than
+   another glyph in the row of chevrons beside it. */
+.twisty--round {
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  font-size: 10px;
+  padding: 0;
+}
+.twisty--round:hover { border-color: var(--accent); color: var(--text); }
+
+/* --- what a card is for, and what it may do --- */
+
+/*
+ * One control per row, and only the chevron opens the panel.
+ *
+ * The previous version put the summary words inside the element that toggles the panel, so
+ * clicking the word "hires" opened a list of unrelated settings and clicking "teams" appeared to
+ * cycle through the card. The strip is now plain text with a single fold button beside it, and
+ * every real control lives in the body with a label saying what it does.
+ */
+/*
+ * The panel floats over the card rather than pushing its contents down.
+ *
+ * A card is a fixed height and its children share that height, so an open panel of six rows was
+ * squeezing the terminal miniature into its 80px floor and shoving the bottom of it out through
+ * the card's own overflow. Measured, not guessed: with the panel open the miniature's bottom edge
+ * sat below the card's. Floating it leaves every other part of the card exactly where it was, and
+ * a settings panel is a momentary thing rather than part of the card's layout.
+ */
+.node-powers { border-bottom: 1px solid var(--line); background: var(--bg); position: relative; }
+
+.node-powers__strip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+/*
+ * The strip is the control, so it has to look like one. A 10px caret with plain text beside it read
+ * as a caption, which is exactly how the owner read it: he reported that a card could not have its
+ * model changed while the picker sat one click away behind that caret.
+ *
+ * Full width and a real hover, so the whole row lights up rather than only the arrow, and the
+ * button reset is here rather than inline because a <button> otherwise arrives with a background,
+ * a border and centred text that would break the row it replaced.
+ */
+.node-powers__strip--open {
+  width: 100%;
+  background: transparent;
+  border: none;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.node-powers__strip--open:hover { background: var(--bg-raised); color: var(--text); }
+.node-powers__strip--open:hover .node-powers__fold,
+.node-powers__strip--open:hover .node-powers__hint { color: var(--text); }
+/*
+ * Pushed to the right so it reads as the action on the row rather than as another value in the
+ * list of values. Only drawn where something can actually be changed.
+ */
+.node-powers__hint {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--text-faint);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.node-powers__fold {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  padding: 0 2px;
+}
+.node-powers__fold:hover { color: var(--text); }
+.node-powers__summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.node-powers__body {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 6;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line-strong);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.55);
+  padding: 6px 9px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  /*
+   * The panel scrolls so the card does not clip.
+   *
+   * .node is a column flexbox with overflow hidden, and this block does not shrink, so an open
+   * panel taller than the space available pushes the terminal miniature and the type-into line
+   * straight out of the bottom of the card. Measured on a default card rather than guessed: at
+   * 240px the input line was gone. This leaves it on screen.
+   */
+  max-height: 132px;
+  overflow-y: auto;
+  /*
+   * A visible scrollbar, because this panel is taller than its window and nothing said so.
+   *
+   * Across four blind passes not one reviewer ever listed the role row, "This card is a", which
+   * sits just below the fold. Every one of them read the band under Effort as leftover padding and
+   * said the list ended there. A setting nobody can see is the same defect this whole piece exists
+   * to fix, one level further in.
+   *
+   * Two fade cues were tried first and both failed, and the failures are worth recording: a dark
+   * gradient is invisible on a dark panel, and the light one that replaced it is invisible on a
+   * panel lighter than the card. Guessing at contrast twice is the point at which to stop guessing
+   * and use the control that says "this scrolls" by convention. It matches the terminal
+   * miniature's own bar, so the board has one vocabulary for scrolling rather than two.
+   */
+  scrollbar-width: thin;
+  scrollbar-color: #aab4cc rgba(255, 255, 255, 0.05);
+}
+.node-powers__body::-webkit-scrollbar { width: 8px; }
+.node-powers__body::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.05); border-radius: 4px; }
+.node-powers__body::-webkit-scrollbar-thumb { background: #aab4cc; border-radius: 4px; }
+.node-powers__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.node-powers__row--read { color: var(--text-faint); }
+.node-powers__value { color: var(--text); text-align: right; }
+.node-powers__pair { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.node-powers__row select {
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 4px;
+  max-width: 62%;
+}
+.node-powers__pair select { max-width: 100%; }
+/* Deliberately quiet: pushing a change into a live session is the exception, not the main path. */
+/*
+ * A border, because without one this did not read as a button at all.
+ *
+ * It is `btn--ghost`, so it had no background and no outline, and a reviewer shown the open panel
+ * described the two "now" labels as faint grey text and said it could not tell whether they were
+ * buttons or status. That is the same fault as the strip above it, one level down: a control that
+ * looks like a caption. It stays quiet when it cannot act, since it is disabled unless the card is
+ * running a claude session with a value chosen.
+ */
+.node-powers__now {
+  font-size: 10px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+.node-powers__now:not(:disabled) { color: var(--text-dim); }
+.node-powers__now:hover:not(:disabled) { color: var(--text); border-color: var(--accent, #7c5cff); }
+.node-powers__note { margin: 4px 0 0; font-size: 10.5px; color: var(--text-faint); line-height: 1.35; }
+
+/* A role change that has not reached the process yet. Amber, matching the "needs you" pill and
+   the subagent list's waiting border, so the board's one colour for "not true yet" stays one
+   colour rather than picking up a second that nearly agrees with it. */
+.node-powers__pending {
+  margin: -2px 0 8px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: var(--warn);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+/* The dot that holds what a turn reviewed. Lime, matching its wire, so the link between the dot
+   and the pictures it opens is readable without following the line. */
+.port-dot--evidence { border-color: #4d7c0f; }
+.port-dot--evidence:hover { border-color: #a3e635; box-shadow: 0 0 8px rgba(163, 230, 53, 0.5); }
+
+/* The last section in the rail, pinned under the list so a rarely wanted action is out of the way
+   of the ones used constantly. */
+/* Two full-width buttons stacked, Play over Stop all, so they need a gap between them. Without it
+   the two edges meet and read as one control with a line through it. */
+.rail-section--foot { border-bottom: none; padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+
+/* --- the two web arrows --- */
+
+/*
+ * The top and bottom connection points are drawn as arrows rather than dots.
+ *
+ * They do a different job from the two on the sides: those join one card to another, these unfold
+ * a block of cards above or below. Four identical dots said the same thing four times, and an
+ * arrow says which way its web opens before anyone clicks it.
+ */
+.port-arrow {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 8px;
+  line-height: 1;
+  border-radius: 3px;
+  background: var(--bg-raised);
+  border: 1.5px solid var(--line-strong);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 120ms, color 120ms, box-shadow 120ms;
+}
+.port-arrow--up:hover { border-color: var(--ok); color: var(--ok); box-shadow: 0 0 8px rgba(45, 212, 191, 0.45); }
+.port-arrow--down:hover { border-color: #7cc4ff; color: #7cc4ff; box-shadow: 0 0 8px rgba(124, 196, 255, 0.45); }
+/* Open reads as lit rather than as a different shape, so the arrow still points the way back. */
+.port-arrow.is-open { border-color: #7cc4ff; color: #7cc4ff; }
+
+/* A saved layout and the button that forgets it, so a name and its bin never wrap onto two lines. */
+.layout-row { display: flex; gap: 4px; align-items: stretch; }
+.layout-row .btn--wide { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layout-row__drop { flex: 0 0 22px; padding: 0; color: var(--text-faint); }
+.layout-row__drop:hover { color: #fda4af; }
+
+/* A style and the version of it the owner kept, on one line so the rail stays scannable. */
+/* --- making a card by saying what it is for --- */
+
+/*
+ * A form rather than a menu, because this is the one decision that cannot be changed afterwards
+ * without restarting the session: the CLI reads a card's permissions once, at launch.
+ */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 8, 12, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+.newcard {
+  width: 460px;
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 14px 16px 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+.newcard__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.newcard__title { font-size: 13px; font-weight: 600; letter-spacing: 0.3px; }
+.newcard__x {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+}
+.newcard__x:hover { color: var(--text); }
+.newcard__row {
+  display: grid;
+  grid-template-columns: 128px 1fr;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+/* Textarea is here for the paths a card owns, which is the one field that takes several lines. A
+   bare textarea inherits the browser's own light chrome, which inside a dark modal reads as a
+   broken control rather than as an input. */
+.newcard__row input,
+.newcard__row select,
+.newcard__row textarea {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 7px;
+  font-size: 12px;
+  font-family: inherit;
+  width: 100%;
+}
+.newcard__row textarea { resize: vertical; }
+.newcard__row input:focus,
+.newcard__row select:focus,
+.newcard__row textarea:focus { outline: none; border-color: var(--line-strong); }
+
+/* The fold between the fast path (role, brief, title) and the rest of the form. Styled as a row
+   of its own text rather than a button, so it reads as "there is more here" and not as a decision
+   the way Cancel and Make the card are. */
+.newcard__more {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 4px 2px 10px;
+  margin: 0;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.newcard__more:hover { color: var(--text-dim); }
+.newcard__more-caret {
+  display: inline-block;
+  transition: transform 120ms ease;
+  transform: rotate(0deg);
+}
+.newcard__more-caret.is-open { transform: rotate(90deg); }
+
+/* What the role actually costs, quoted from the table that writes the deny list. */
+.newcard__powers {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 4px 0 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.newcard__powers p { margin: 0 0 5px; }
+.newcard__powers p:last-child { margin-bottom: 0; }
+.newcard__summary { color: var(--text); }
+.newcard__denies strong { color: var(--text); font-weight: 600; }
+.newcard__enforced { color: var(--text-faint); }
+
+.newcard__check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.newcard__check em {
+  display: block;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.newcard__foot { display: flex; justify-content: flex-end; gap: 8px; }
+.newcard__foot button {
+  border-radius: 7px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text-dim);
+}
+.newcard__cancel:hover { color: var(--text); }
+.newcard__make {
+  background: var(--accent, #7cc4ff);
+  border-color: transparent;
+  color: #06131f;
+  font-weight: 600;
+}
+.newcard__make:hover { filter: brightness(1.08); }
+
+/*
+ * Grabbing a corner should not need aim.
+ *
+ * The corner handles were nine pixels square and only existed once a card had been selected, which
+ * made resizing from a diagonal a two-step operation with a small target at the end of it. They are
+ * mounted all the time now and appear as soon as the pointer is over the card, and each one carries
+ * an invisible target well outside the square that is actually drawn, so the diagonal is caught
+ * from roughly a finger's width away.
+ *
+ * They stay out of the way until then: nothing is drawn and nothing takes a click while the pointer
+ * is elsewhere, or the board would be a field of handles and dragging a card by its edge would
+ * resize it instead.
+ */
+.react-flow__node .card-resize-handle,
+.react-flow__node .card-resize-line {
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.react-flow__node:hover .card-resize-handle,
+.react-flow__node.selected .card-resize-handle,
+.react-flow__node:hover .card-resize-line,
+.react-flow__node.selected .card-resize-line {
+  opacity: 1;
+}
+
+/*
+ * A corner stays grabbable even while it is invisible.
+ *
+ * Its target deliberately reaches outside the card, and hiding it from the pointer until the card
+ * is hovered meant the target's outer half was dead: moving onto it left the card, the handle
+ * vanished, and the press landed on empty canvas. Only the drawn square fades; what can be grabbed
+ * does not move.
+ */
+.react-flow__resize-control.handle.card-resize-handle {
+  /*
+   * Absolute, which is what React Flow sets and what puts each handle on its corner. Setting this
+   * to relative to anchor the enlarged target left four handles in the normal flow, stacked above
+   * the card, and pushed the card fifty-six pixels down its own wrapper: an empty band across the
+   * top of every session. An absolutely positioned box anchors a pseudo-element just as well.
+   */
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--accent);
+  border: 1.5px solid #0b0d12;
+  pointer-events: all;
+}
+/* The part that makes a corner easy to hit: a target far larger than the square it draws. */
+.card-resize-handle::after {
+  content: '';
+  position: absolute;
+  inset: -10px;
+}
+
+/* Each corner says which way it will go, so a diagonal reads as a diagonal before it is pressed. */
+.react-flow__resize-control.handle.top.left { cursor: nwse-resize; }
+.react-flow__resize-control.handle.bottom.right { cursor: nwse-resize; }
+.react-flow__resize-control.handle.top.right { cursor: nesw-resize; }
+.react-flow__resize-control.handle.bottom.left { cursor: nesw-resize; }
+
+/*
+ * Corner handles sit outside the card, not on top of it.
+ *
+ * React Flow centres each one on its corner, so half of a handle and half of its enlarged target lie
+ * over the card's own header, where the size and rename buttons are. With a target three times the
+ * drawn square that was enough to swallow the expand button in the top right corner. Nudged fully
+ * outside, they cover nothing and are still easier to hit than before, because the room they gained
+ * is on the empty canvas side where there is nothing to take it from.
+ */
+.react-flow__resize-control.handle.card-resize-handle.top.left { translate: -100% -100%; }
+.react-flow__resize-control.handle.card-resize-handle.top.right { translate: 0 -100%; }
+.react-flow__resize-control.handle.card-resize-handle.bottom.left { translate: -100% 0; }
+.react-flow__resize-control.handle.card-resize-handle.bottom.right { translate: 0 0; }
+
+/* --------------------------------------------------------------------------
+   The pipeline panel: what a card's runs actually reached.
+
+   Three states have to look like three things, and a guessed stage must not look like an
+   observed one, so the appearances are set here rather than left to a colour that a reader has
+   to be told about. Reached is a filled cell with a pale blue edge. Never happened is flat and
+   dim with no edge at all. Not known yet is hatched and dashed, which is the same vocabulary the
+   context gauge uses for "no real number", and it is used here for the same reason: a stage of a
+   run that is still open has not failed, it has not happened yet.
+
+   No green anywhere in this block, deliberately. Teal is this app's colour for good, and a
+   reached stage is not good news, it is an observation that a command ran.
+   -------------------------------------------------------------------------- */
+.node--pipeline {
+  background: var(--bg-panel);
+  font-size: 12px;
+}
+.pipe-head { border-top-color: #7cc4ff; cursor: grab; }
+.pipe-head:active { cursor: grabbing; }
+
+.pipe-claim {
+  padding: 7px 10px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+  border-bottom: 1px solid var(--line);
+}
+
+/* The project summary, drawn as a known gap. Hatched like an unknown stage because that is what
+   it is: the number exists on the server and nothing carries it here, so it is neither zero nor
+   fine. */
+.pipe-summary {
+  margin: 8px 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 6px;
+  background: repeating-linear-gradient(45deg, #10141f, #10141f 3px, #1c2333 3px, #1c2333 6px);
+}
+.pipe-summary__title { font-weight: 600; color: var(--text); }
+.pipe-summary__body { color: var(--text-dim); font-size: 11.5px; line-height: 1.5; }
+
+.plegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 0 10px 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  border-bottom: 1px solid var(--line);
+}
+.plegend__item { display: inline-flex; align-items: center; gap: 6px; }
+.plegend__swatch {
+  width: 22px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.plegend__swatch--reached { background: #141a2b; border-left: 3px solid #7cc4ff; }
+.plegend__swatch--none { background: #0a0d15; border-style: solid; }
+.plegend__swatch--unknown {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: repeating-linear-gradient(45deg, #10141f, #10141f 3px, #1c2333 3px, #1c2333 6px);
+}
+.plegend__swatch--inferred { background: #141a2b; border-left: 3px solid var(--warn); }
+
+.pipe-runs { flex: 1; min-height: 0; overflow: auto; padding: 8px 10px 10px; }
+.pipe-empty {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 8px 2px;
+}
+
+.prun { padding: 8px 0 10px; border-bottom: 1px solid var(--line); }
+.prun:last-child { border-bottom: none; }
+/* The run label stays with its own stages while that run is scrolled through.
+   A blind reviewer found seven stage cards at the top of the list with no heading above them,
+   their header having scrolled out, which lets a reader attach them to the wrong prompt. In a view
+   whose whole purpose is saying what one particular run did, that is a correctness fault rather
+   than polish. Sticky within the run list, so each header is pushed out by the next run's rather
+   than accumulating. */
+.prun__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-panel);
+  padding: 2px 0;
+}
+.prun__when { color: var(--text-faint); font-size: 11px; flex: 0 0 auto; }
+.prun__ask {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip--open { color: #7cc4ff; border-color: #24405c; }
+.prun__note { color: var(--text-dim); font-size: 11px; margin: 0 0 6px; }
+
+/* Seven across, always. A stage missing from the row would read as a stage that does not exist. */
+.prun__stages { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+
+/* Nothing hidden, because everything in a cell is either the server's own sentence or an event it
+   recorded, and half of either is worse than none. A blind reviewer found "no SubagentStart/Subagen
+   tSt" and "PreToolUse:ExitPlanM" cut mid-word: those are single unbreakable tokens, and hiding what
+   overflows is what made the damage invisible to the card that wrote it. Long tokens wrap now. */
+.pstage {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 6px 7px;
+  min-height: 92px;
+}
+.pstage__label { font-weight: 600; color: var(--text); font-size: 11.5px; }
+.pstage__state { font-size: 11px; margin-top: 2px; }
+.pstage__prov { font-size: 10px; color: var(--text-dim); margin-top: 3px; line-height: 1.35; }
+.pstage__prov.is-inferred { color: var(--warn); }
+.pstage__ev { list-style: none; margin: 5px 0 0; padding: 0; }
+.pstage__ev li {
+  font: 10px/1.35 'Cascadia Mono', Consolas, monospace;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+.pstage__kind { display: block; color: var(--text-faint); overflow-wrap: anywhere; }
+/* Says whether a call started or returned, from the event type. Between the two so it reads as a
+   qualifier on the event above it rather than as part of the path below. */
+.pstage__phase { display: block; color: var(--text-faint); font-style: italic; }
+/* overflow-wrap rather than word-break: break-all, which was the rule here and was wrong. break-all
+   splits a word whether or not it has to, which is where "fix the terminal fo / cus bug" came from.
+   This breaks inside a word only when there is no other way to fit it, so a path still wraps and
+   "focus" stays "focus". */
+.pstage__detail { display: block; overflow-wrap: anywhere; }
+.pstage__more { color: var(--text-faint); }
+.pstage__why {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* Seen: filled, with a pale blue edge on the side the eye scans first. */
+.pstage--reached {
+  background: #141a2b;
+  border-left: 3px solid #7cc4ff;
+}
+.pstage--reached .pstage__state { color: #7cc4ff; }
+
+/* Inferred: the same filled cell wearing amber, so a guess never looks like an observation. */
+.pstage--inferred { border-left-color: var(--warn); }
+.pstage--inferred .pstage__state { color: var(--warn); }
+
+/* Never happened: flat and dim, and it still says so in words. */
+.pstage--not-reached {
+  background: #0a0d15;
+  border-color: var(--line);
+}
+.pstage--not-reached .pstage__label { color: var(--text-dim); }
+.pstage--not-reached .pstage__state { color: var(--text-faint); }
+
+/* Not known yet: hatched and dashed, never blank. */
+.pstage--unknown {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: repeating-linear-gradient(45deg, #10141f, #10141f 3px, #1c2333 3px, #1c2333 6px);
+}
+.pstage--unknown .pstage__state { color: var(--text); }
+
+/*
+ * The message card: the owner and one session, and nothing else on it.
+ *
+ * Built to read as a conversation rather than as a card with a body, so it borrows the board's
+ * frame and none of its furniture. No status light, no gauge, no ports drawn: the only thing that
+ * happens on it is two people talking, and every control that is not that is a thing to look at
+ * instead of the words.
+ */
+.channel {
+  background: var(--bg-node);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+.channel.is-selected { border-color: var(--line-strong); }
+/* Dashed while it is drawn but not yet wired, so an unbound card looks unfinished rather than broken. */
+.channel.is-unbound { border-style: dashed; }
+
+.channel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+}
+.channel-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.channel-x {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.channel-x:hover { color: var(--text); }
+
+.channel-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.channel-preamble,
+.channel-empty {
+  color: var(--muted);
+  margin: 0;
+  line-height: 1.45;
+}
+.channel-empty { padding: 4px 2px; }
+
+/*
+ * Each turn is a block with a name over it, not a bubble.
+ *
+ * Bubbles need a left and a right side to mean anything, and that costs half the width of a card
+ * that is already narrow. A name and a rule down the edge says who is speaking in the same glance
+ * and leaves the whole width for what was said.
+ */
+.channel-turn {
+  border-left: 2px solid var(--line);
+  padding-left: 8px;
+}
+.channel-turn.is-mine { border-left-color: var(--accent, #7c5cff); }
+.channel-who {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.channel-when { text-transform: none; letter-spacing: 0; opacity: 0.75; }
+.channel-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.channel-note {
+  margin: 0;
+  padding: 4px 8px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+}
+
+.channel-form {
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  border-top: 1px solid var(--line);
+  align-items: flex-end;
+}
+.channel-input {
+  flex: 1;
+  resize: none;
+  min-height: 34px;
+  max-height: 120px;
+  background: var(--bg-input, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  padding: 6px 8px;
+}
+.channel-input:focus { outline: none; border-color: var(--line-strong); }
+/*
+ * A send button that looks different when it will actually send.
+ *
+ * It was one muted rectangle in both states, and a blind reviewer comparing an unusable card with a
+ * ready one reported them as identical: "no brighter fill, no higher-contrast text, so appearance
+ * alone doesn't tell me the button is now active". Two states that cannot do the same thing must
+ * not look the same.
+ */
+.channel-send {
+  border: 1px solid var(--accent, #7c5cff);
+  border-radius: 6px;
+  background: var(--accent, #7c5cff);
+  color: #0b0d12;
+  font: inherit;
+  font-weight: 600;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.channel-send:disabled {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-weight: 400;
+  cursor: default;
+}
+.channel-send:not(:disabled):hover { filter: brightness(1.12); }
+
+/* Small, because it is a thing to notice once and then stop reading. */
+.channel-hint {
+  color: var(--muted);
+  font-size: 10px;
+  padding-bottom: 10px;
+  white-space: nowrap;
+}
+
+/* The file itself, open for editing on the card. */
+.channel-edit {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 6px;
+}
+.channel-edit__text {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  background: var(--bg-input, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  line-height: 1.45;
+  padding: 8px;
+}
+.channel-edit__text:focus { outline: none; }
+.channel-edit__foot { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+
+/* A discard is not the same weight as a save, so it does not look like one. */
+.channel-send--ghost {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* Clicking the conversation opens it, so it says so on hover rather than only in a tooltip. */
+.channel-log { cursor: text; }
+.channel-note--bad { color: var(--warn, #f59e0b); }
+
+/* A control that acts on the whole server, sized like the badges it sits beside rather than like
+   a primary action: it is rarely wanted and always confirmed. */
+.topbar-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.topbar-btn:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }
+.topbar-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* --- what the Ceiling panel says when the server refuses one of its numbers --- */
+
+/*
+ * The server's own sentence, under the control that caused it.
+ *
+ * Red, because it is a refusal, and left as prose rather than shortened: the whole value of it is
+ * that it names the rule and the card, and a refusal trimmed to fit a rail has stopped being
+ * evidence.
+ */
+.rail-refusal {
+  margin: 4px 0 0;
+  padding: 5px 7px;
+  background: #2a0f18;
+  border: 1px solid #4c1d29;
+  border-radius: var(--radius);
+  color: #fda4af;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+/* --- how a refusal reads, wherever the board draws one --- */
+
+/*
+ * What is left of the Tasks panel's styling, and why so little of it.
+ *
+ * The panel listed every task on the board and the owner asked for it to go, so its rows, its
+ * facts grid, its state pills, its forms and its fields went with it. A refusal is still drawn,
+ * in the pill above the card it happened to, and these are the four rules that body uses.
+ */
+/* The line under a refusal: when it happened, and which task it was about. Never the fact itself. */
+.task-meta { color: var(--text-dim); font-size: 11px; }
+/* A refusal's own sentence, which is the server's words and the reason the row is worth reading. */
+.task-why { color: var(--text); font-size: 11.5px; line-height: 1.35; }
+/* Whether anything was actually stopped, in words, under a refusal that was only recorded. */
+.task-armed { margin: 0; color: var(--text-dim); font-size: 11px; line-height: 1.35; }
+/* The rule a refusal names, which is the one word in the entry worth scanning for. */
+.task-reason { color: var(--text); font-weight: 600; }
+
+/*
+ * Refused and would-refuse, drawn apart.
+ *
+ * In shadow every rule is evaluated and every refusal recorded while the message is delivered
+ * anyway, which is the whole of canon's rollout: the owner watches what would have been stopped
+ * before anything is stopped. One colour for both would hide the difference between a board that is
+ * watching and a board that is refusing, which is the most important thing this list says.
+ */
+.task-refusal-type {
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  color: var(--text-dim);
+}
+.task-refusal-type--TaskRefused { color: #fda4af; border-color: #4c1d29; }
+.task-refusal-type--TaskWouldRefuse { color: var(--warn); border-color: #4a3410; }
+.task-refusal-type--SenderUnverified { color: #fda4af; border-color: #4c1d29; }
+
+/* --- the refusal pill above a card --- */
+
+/*
+ * Its own colour in a row of day pills, because it is not a day.
+ *
+ * Same shape and the same 260px width as the pills beside it, so the row reads as one control
+ * rather than as two designs sharing a line, and a different border so it is findable in a row that
+ * may be nine pills long.
+ */
+.colhead--refusal { border-color: #4c1d29; color: #fda4af; }
+.colhead--refusal:hover { background: #2a1420; }
+.colhead--refusal.is-open { background: #1a0f16; }
+
+/*
+ * What the pill opens to, hanging below it rather than pushing the row apart.
+ *
+ * Absolutely positioned so opening one does not move the pills next to it: a row that reflows on a
+ * click makes the owner lose the thing he was about to read. Capped and scrollable because a board
+ * in shadow can record a great many of these and a panel taller than the canvas is not a panel.
+ *
+ * The three text properties at the end undo the pill's own uppercasing and letter spacing, which
+ * are right for a label of one word and unreadable on a sentence.
+ */
+.refusal-open {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 6px;
+  width: 380px;
+  /* Raised from 320px when the entries gained the sentence saying which door and which rule: one
+     entry no longer fitted, so the first thing a reader met was a sentence cut in half. Still
+     capped and still scrollable, because a card can hold more of these than a screen holds. */
+  max-height: 460px;
+  overflow-y: auto;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg-panel);
+  border: 1px solid #4c1d29;
+  border-radius: var(--radius);
+  pointer-events: auto;
+  cursor: default;
+  text-transform: none;
+  letter-spacing: normal;
+  text-align: left;
+}
+.refusal-open__row { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; align-items: flex-start; }
+
+/*
+ * One count per kind, each under the word that names it.
+ *
+ * The pill drew a single number beside a single label, and the number counted things the label did
+ * not name: `WOULD REFUSE 2` over one that would have been refused and one unverified sender. Each
+ * pair is its own group so they read as pairs, and the pill sizes to what it is holding rather than
+ * to the fixed 260px the day pills beside it use, because one kind or three is not the same width.
+ */
+.colhead-seg { display: inline-flex; align-items: center; gap: 5px; }
+.colhead--refusal { width: auto; min-width: 140px; max-width: 380px; justify-content: flex-start; gap: 10px; }
+
+/* --- the task pill on a card's face --- */
+
+/*
+ * What this card is accountable for, beside what it is doing.
+ *
+ * Allowed to shrink and to lose its tail, unlike the status pill next to it, because a task id is
+ * as long as whoever chose it made it and the card's title must stay readable: `min-width: 0` is
+ * what lets a flex child actually shrink. The full id and state are on the title attribute, so
+ * nothing is lost by the truncation, only folded.
+ */
+.node-task {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.2px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid #134e4a;
+  color: var(--ok);
+}
+.node-task--in_review { border-color: #1d3a56; color: #7cc4ff; }
+.node-task--remediating { border-color: #4a3410; color: var(--warn); }
+
+/* One line at the top of the board for a connection that may read and may change nothing. */
+.banner--guest { background: #1a1508; color: #f5d08a; border-bottom: 1px solid #4a3410; }
+/* The server's own sentence, under the line that explains it and inside the same banner. */
+.banner__under { margin-top: 3px; color: #fcd9a4; opacity: 0.9; }
+
+/*
+ * What a read-only board looks like, without a single control being turned off.
+ *
+ * The banner said reading only and the pixels said nothing, so a first-time reader would press
+ * something before believing the banner. This dims the controls that send a change, and dims them
+ * only: they still take the click, still send, and still come back with the server's refusal, which
+ * is where the rule actually lives. A control greyed out by the page says only that the page
+ * decided, which is not evidence and cannot be checked.
+ *
+ * `pointer-events` is deliberately untouched, and `:disabled` is deliberately not used.
+ */
+.app--guest .btn,
+.app--guest .topbar-btn {
+  opacity: 0.45;
+}
+/*
+ * A locked row dims whole, and that is the correction rather than a preference.
+ *
+ * Dimming only the boxes left the labels, the counts under them and the bare Subagents figure at
+ * full strength, so the section still read live beside the dim buttons: the reader called the boxed
+ * values the brightest text on the rail and was right about how it reads. The row is one statement,
+ * so it carries one opacity, the same 0.45 the buttons beside it carry.
+ *
+ * The input keeps only its cursor here. Its own opacity would multiply against the row's and take
+ * the number to 0.18, which is unreadable rather than disabled.
+ */
+.rail-limit-row.is-locked { opacity: 0.45; }
+.rail-limit-row input:disabled { cursor: not-allowed; }
+/*
+ * There was an exemption here for the owner key field, which was the one control a guest was
+ * being told to use and so the one that could not be dimmed. There is no such field now: the key
+ * arrives in the address the launcher opens, and the banner says so.
+ */
+
+/*
+ * The header says so when the page and the server are on different code.
+ *
+ * Warning-coloured rather than faint like the version beside it: this is not a label, it is a state
+ * that needs fixing, and a faint chip next to a faint version is a thing nobody reads.
+ */
+.brand-split {
+  align-self: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--warn);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0 6px;
+  cursor: default;
+}

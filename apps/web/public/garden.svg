@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Garden">
+  <!--
+    Garden's mark: a seedling, two leaves on a stem.
+
+    Drawn at 32 and meant to be read at 16, which is the size a browser tab gives it, so everything
+    here is a thick simple shape. Detail below about two pixels wide disappears entirely at that
+    size and only makes the icon muddy, which is why there is no soil, no pot and no third leaf.
+
+    The panel-coloured rounded square is not decoration. A favicon sits on whatever colour the
+    browser's tab strip happens to be, light or dark, and a bare teal sprout vanishes against a pale
+    one. The square gives it its own ground so it reads the same in both.
+
+    Colours are the app's own: the panel background for the ground, and for the plant the same green
+    a working card's status dot uses.
+
+    NOTE FOR ANYONE EDITING THIS COMMENT. An SVG served as a file is parsed as XML, and XML forbids a
+    double hyphen inside a comment. The first version of this file named the CSS custom properties
+    directly, which put two hyphens in this block, and the browser refused the whole document and
+    drew a broken image while curl still returned it with a 200 and the right content type. Name
+    colours in words here, not as their variables.
+
+    An explicit width and height as well as the viewBox, because an SVG without them has no
+    intrinsic size, and an `img` element then reports a natural width of zero whether it loaded or
+    failed. Having a real size back makes that number mean something again.
+  -->
+  <rect width="32" height="32" rx="7" fill="#0b0e16" />
+  <g fill="none" stroke="#2dd4bf" stroke-linecap="round" stroke-linejoin="round">
+    <!-- The stem, from the base up to just under the leaves. -->
+    <path d="M16 26 V14" stroke-width="2.6" />
+    <!-- Two leaves, each a closed curve springing from the stem rather than floating beside it. -->
+    <path d="M16 15 C 16 9.5, 12 7, 8.5 7 C 8.5 11.5, 11.5 15, 16 15 Z" stroke-width="2" fill="#2dd4bf" fill-opacity="0.22" />
+    <path d="M16 17 C 16 11.5, 20 9, 23.5 9 C 23.5 13.5, 20.5 17, 16 17 Z" stroke-width="2" fill="#2dd4bf" fill-opacity="0.22" />
+  </g>
+</svg>

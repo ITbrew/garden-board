@@ -1,0 +1,35 @@
+{
+  "name": "garden",
+  "version": "1.1.7",
+  "private": true,
+  "description": "A node-graph control room for AI CLI sessions",
+  "workspaces": [
+    "packages/*",
+    "server",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev -w @garden/server",
+    "dev:supervised": "concurrently -n server,web -c cyan,magenta \"npm:dev:server:supervised\" \"npm:dev:web\"",
+    "dev:server:supervised": "node server/bin/garden-supervise.mjs",
+    "dev:server:watch": "npm run dev:watch -w @garden/server",
+    "dev:web": "npm run dev -w @garden/web",
+    "build": "npm run build -w @garden/shared && npm run build -w @garden/server && npm run build -w @garden/web",
+    "stable": "npm run build && node server/dist/index.js",
+    "start": "node server/dist/index.js",
+    "typecheck": "tsc -b packages/shared server apps/web",
+    "prepare": "git config core.hooksPath .githooks",
+    "check": "node scripts/check-no-live-board.mjs && node scripts/check-no-secrets.mjs --all && npm run typecheck",
+    "test": "node scripts/run-suite.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2"
+  },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "esbuild": true,
+    "node-pty": true
+  }
+}

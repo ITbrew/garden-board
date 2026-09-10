@@ -1,0 +1,285 @@
+/*
+ * The Subagents / Tools list, pinned beside an agent card.
+ *
+ * Kept in its own file rather than appended to styles.css so it can be written whole and reviewed
+ * on its own. Import it once from main.tsx.
+ *
+ * Specification: docs/canonical/13-card-orientation.md.
+ */
+
+.salist {
+  /*
+   * Pinned to the card, not merely near it.
+   *
+   * Absolute against the node's own box, so it travels with the card when the card is dragged and
+   * stays put at any zoom. `left: 100%` puts it just past the right edge and the gap is the 5-10px
+   * canon asks for: close enough to read as attached, far enough that the card's own border and
+   * the list's do not merge into one line.
+   */
+  position: absolute;
+  top: 0;
+  left: calc(100% + 8px);
+  width: 210px;
+  max-width: 210px;
+
+  display: flex;
+  flex-direction: column;
+  background: var(--card-bg, #16131d);
+  border: 1px solid var(--salist-edge, #2f8f84);
+  border-radius: 7px;
+  overflow: hidden;
+
+  /* Above the canvas grid and any wire that passes behind it, below an expanded card. */
+  z-index: 3;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/*
+ * A list holding something that needs the owner is legible from across the board.
+ *
+ * Without this, a card stopped at a permission prompt inside a shut list is invisible, which is the
+ * failure this whole feature is meant to avoid rather than introduce.
+ */
+.salist.has-waiting {
+  border-color: var(--alert, #e0794b);
+  box-shadow: 0 0 0 1px var(--alert, #e0794b) inset;
+}
+
+/*
+ * A dispatch just fired. `has-waiting` above is a state ("something in here needs you") and stays
+ * lit for as long as that is true; this is an event ("something in here just happened") and always
+ * ends on its own, whether or not the new arrival ends up waiting on anything. Two iterations of
+ * `alert-pulse`, the same keyframe styles.css already uses for the card's own "needs you" banner,
+ * so a pulse reads the same wherever it appears on the board rather than as a second animation that
+ * nearly agrees with the first. Fires while shut, since a needs-input child hidden inside a closed
+ * list is exactly what this list exists to keep from happening silently.
+ */
+.salist.is-pulsing {
+  animation: alert-pulse 1.6s ease-in-out 2;
+}
+
+.salist-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--salist-head-bg, rgba(45, 212, 191, 0.1));
+  border: 0;
+  border-bottom: 1px solid var(--salist-edge, #2f8f84);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.salist.is-shut .salist-head {
+  border-bottom: 0;
+}
+
+.salist-head:hover {
+  background: var(--salist-head-hover, rgba(45, 212, 191, 0.18));
+}
+
+.salist-head:focus-visible {
+  outline: 2px solid var(--focus, #7dd3fc);
+  outline-offset: -2px;
+}
+
+.salist-caret {
+  display: inline-block;
+  transition: transform 120ms ease;
+  transform: rotate(-90deg);
+  opacity: 0.8;
+}
+
+.salist-caret.is-open {
+  transform: rotate(0deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .salist-caret {
+    transition: none;
+  }
+}
+
+.salist-title {
+  flex: 1 1 auto;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * The count never hides. A shut list with three agents inside must not look like a card that hired
+ * nobody, and this is the only thing on a collapsed header that says otherwise.
+ */
+.salist-count {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.salist-count--waiting {
+  color: var(--alert, #e0794b);
+  opacity: 1;
+}
+
+.salist-body {
+  /*
+   * Scrolls inside its own rectangle rather than growing without limit, so a card that hired
+   * fifteen agents does not push a column of cards down the board.
+   */
+  max-height: 190px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/*
+ * A row is now two controls side by side, so the item is the flex container and the row itself
+ * takes the slack. It was `width: 100%` when it was the only child; that would push the transcript
+ * button out of the box entirely.
+ */
+.salist-body > li {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+}
+
+.salist-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.salist-row:hover:not(:disabled) {
+  background: var(--salist-row-hover, rgba(255, 255, 255, 0.06));
+  border-color: var(--salist-edge, #2f8f84);
+}
+
+.salist-row:disabled {
+  cursor: default;
+}
+
+.salist-row:focus-visible {
+  outline: 2px solid var(--focus, #7dd3fc);
+  outline-offset: -2px;
+}
+
+.salist-row-title {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * Lifted from 0.55. A blind reviewer named this specifically as harder to read than the row's own
+ * label, and it now carries the status rather than a constant, so it is worth reading.
+ */
+.salist-row-meta {
+  flex: 0 0 auto;
+  opacity: 0.75;
+  font-size: 10px;
+}
+
+/*
+ * The "no transcript" note. Deliberately not styled as a button: it is a statement about why there
+ * is nothing to press, and making it look pressable would be the dead control this replaced.
+ */
+.salist-row-notranscript {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 4px 7px;
+  font-size: 10px;
+  line-height: 1.1;
+  opacity: 0.45;
+  font-style: italic;
+  white-space: nowrap;
+}
+
+/*
+ * Opens what the agent actually said.
+ *
+ * Given a real border rather than a ghost style. A blind reviewer on 2026-08-13 could not tell the
+ * powers panel's borderless buttons were buttons at all, and this one carries more weight than
+ * those did: with the card off the canvas it is the only way to a throwaway's conversation, so a
+ * control nobody recognises is the same as no control.
+ */
+.salist-row-transcript {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 4px 7px;
+  background: var(--salist-row-hover, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--salist-edge, #2f8f84);
+  border-radius: 5px;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.1;
+  cursor: pointer;
+  opacity: 0.85;
+}
+
+.salist-row-transcript:hover {
+  opacity: 1;
+  background: var(--salist-edge, #2f8f84);
+}
+
+.salist-row-transcript:focus-visible {
+  outline: 2px solid var(--focus, #7dd3fc);
+  outline-offset: -2px;
+}
+
+/*
+ * One dot per row, coloured by what the entry is and what it is doing. A finished agent keeps its
+ * row and draws grey: still there, no longer live. Nothing here removes anything.
+ */
+.salist-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.salist-dot--working {
+  color: var(--ok, #2dd4bf);
+}
+
+.salist-dot--idle {
+  color: var(--idle, #8b93a7);
+}
+
+.salist-dot--waiting {
+  color: var(--alert, #e0794b);
+}
+
+.salist-dot--done {
+  color: var(--done, #5b5566);
+}
+
+.salist-dot--tool {
+  color: var(--tool, #56b8e8);
+  border-radius: 2px;
+}
