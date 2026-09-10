@@ -166,7 +166,7 @@ holding only current state cannot answer that.
 ```
 no way to CANCEL a dispatch    a stop has to be sent as a message the card then reads,
                                and a card mid-turn finishes anyway
-every card commits as one user     per-commit attribution across cards is impossible, and
+every card commits as one user per-commit attribution across cards is impossible, and
                                `git add X && git commit` commits the INDEX, so one card
                                can sweep another's staged files into its own commit
 capabilities are undocumented  what a card can actually DO is not in the roster. One card
@@ -186,7 +186,7 @@ with no error and no survivor to report it. Two things were missing that day and
 
 **Nothing recorded the death.** The server's stdout goes to whatever terminal launched it and is
 lost when that window closes; the newest server log on the machine was five days stale. The cause
-had to be inferred from free memory and an application queue log rather than read. **A supervisor that
+had to be inferred from free memory and a Unity queue log rather than read. **A supervisor that
 restarted the server without writing down why it died would fix the symptom and destroy the only
 evidence**, so the log matters more here than the restart.
 

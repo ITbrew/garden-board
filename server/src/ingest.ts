@@ -380,6 +380,7 @@ export class Ingest {
       startedAt: at,
       endedAt: null,
       filesTouched: [],
+      tasksCompleted: [],
       toolCalls: 0,
     }
     this.store.upsertWork(rec)
@@ -391,6 +392,42 @@ export class Ingest {
     const open = this.store.findOpenWork(sessionId, promptId)
     if (!open || open.endedAt) return
     this.store.upsertWork({ ...open, endedAt: at })
+    this.broadcast({ t: 'work', sessionId, records: this.store.listWork(sessionId) })
+  }
+
+  /**
+   * The states canon 20 counts as the end of a task, from history's point of view.
+   *
+   * `done` and `confirmed` are the two a delivered message can actually produce today; `closed` is
+   * in the list because canon names it as an end and leaving it out would make this set quietly
+   * disagree with the document it comes from, not because anything reaches it yet.
+   *
+   * A static member rather than a module constant so the rule sits beside the only thing that uses
+   * it, and so the mail door imports one name rather than repeating two string literals.
+   */
+  static readonly TERMINAL_TASK_STATES: ReadonlySet<string> = new Set(['done', 'confirmed', 'closed'])
+
+  /**
+   * A task reached a terminal state, and this card's open turn is what moved it there.
+   *
+   * The other half of what a turn can have done. Files come in through `onPostTool`, which is the
+   * CLI reporting its own write; this comes in from the mail door, after the transition has already
+   * been written to the task table. Both are facts the board observed rather than claims an agent
+   * made about itself, and that is the only grade of fact a history page is allowed to rest on.
+   *
+   * Called with no prompt id, because the transition arrives over HTTP from a shim the card ran
+   * inside its turn and nothing on that request carries one. `findOpenWork` with a null id takes
+   * the newest turn this card has not closed yet, which is the turn the shim ran in.
+   *
+   * A card with no open turn records nothing at all. That happens when the owner moves a task from
+   * the board himself, or when a card's mail somehow lands after its `Stop`: there is no turn to
+   * attribute the completion to, and inventing one, or hanging it on the previous turn, would put a
+   * sentence on a page that nothing could check. History would rather be short than wrong.
+   */
+  noteTaskCompleted(sessionId: string, taskId: string) {
+    const open = this.store.findOpenWork(sessionId, null)
+    if (!open || open.endedAt || open.tasksCompleted.includes(taskId)) return
+    this.store.upsertWork({ ...open, tasksCompleted: [...open.tasksCompleted, taskId] })
     this.broadcast({ t: 'work', sessionId, records: this.store.listWork(sessionId) })
   }
 
@@ -504,6 +541,9 @@ export class Ingest {
       roleClass: 'worker',
       canSpawnAgents: parent.canSpawnAgents,
       canUseTeams: false,
+      // Not inherited from the parent. This is the card's own answer, and a subagent card has
+      // never given one, so it follows the board like any other silent card.
+      subagentsAllowed: null,
       effort: null,
       // An agent inherits what it was hired under, so a manager set to opus does not quietly get
       // a team running on something else.
@@ -580,6 +620,15 @@ export class Ingest {
     this.store.upsertWire(wire)
     this.broadcast({ t: 'wire.added', wire })
     this.broadcast({ t: 'wire.pulse', wireId: wire.id, kind: 'derived' })
+
+    /*
+     * Nothing is dropped here, and `BoardLimits.subagents` is not consulted.
+     *
+     * A version of this method deleted the oldest spent records once the board went past that
+     * figure. Canon 15 forbids it in as many words: a limit refuses something new, it never removes
+     * what already exists. The figure is a ceiling the CLI holds at launch, so by the time this
+     * runs the dispatch has happened and the only thing left to do with it is record it.
+     */
   }
 
   /*

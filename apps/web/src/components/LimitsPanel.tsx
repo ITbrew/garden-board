@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { BoardLimits } from '@garden/shared'
 import { actions } from '../state'
 import { getIdentity, onTasks, refusalSentence } from '../tasks'
-import { silenceOf } from '../task-types'
+
 
 /**
  * One editable ceiling, with what already counts against it shown beside the number that governs
@@ -17,7 +17,9 @@ function LimitRow({
   hint,
   value,
   counted,
+  unit,
   locked,
+  moot,
   onCommit,
 }: {
   label: string
@@ -25,8 +27,31 @@ function LimitRow({
   value: number
   /** What already counts against this ceiling, or null when nothing does (children per card). */
   counted: number | null
+  /**
+   * What the figure is counted over, for the rows that have no board-wide count to show.
+   *
+   * Not a number and never derived from one. Two blind readers given only this panel said the same
+   * two things: that they could not tell whether the boxes on the uncounted rows were limits or
+   * current readings, and that the spawn limit carried no units at all, so "4" might be four
+   * parents, four spawns each, or four at a time. Both are answered by saying what the figure is
+   * per, which is a fact about the field rather than a measurement of the board, so nothing here
+   * can be stale or invented.
+   *
+   * It sits in the same slot as "3 of 12" deliberately. The alternative was to borrow the board's
+   * subagent total to fill the gap, which would read as "12 of 5" and would be the panel asserting
+   * a relationship between two numbers that have none.
+   */
+  unit?: string
   /** True on a tab the server has answered as a guest. See the note on the panel below. */
   locked: boolean
+  /**
+   * True when this row governs something the board has switched off, which greys it and says why.
+   *
+   * A separate prop from `locked` although both end up grey, because they are different facts and
+   * the row has to be able to say which one it is. Locked is "this tab may not change anything";
+   * this is "the board is not doing this at all, so there is nothing for this number to govern".
+   */
+  moot?: string
   onCommit: (n: number) => void
 }) {
   const [text, setText] = useState(String(value))
@@ -45,16 +70,21 @@ function LimitRow({
   }
 
   return (
-    <label className={`rail-limit-row ${locked ? 'is-locked' : ''}`} title={hint}>
+    <label className={`rail-limit-row ${locked || moot ? 'is-locked' : ''}`} title={moot || hint}>
       <span className="rail-limit-row__label">
         {label}
-        {counted !== null && <em>{counted} of {value}</em>}
+        {/*
+          The reason replaces the unit rather than sitting beside it. A row that governs nothing
+          right now has no useful unit to state, and two small lines under one label is how the
+          panel stopped being readable the last time.
+        */}
+        {moot ? <em>{moot}</em> : counted !== null ? <em>{counted} of {value}</em> : unit ? <em>{unit}</em> : null}
       </span>
       <input
         type="number"
         min={1}
         max={200}
-        disabled={locked}
+        disabled={locked || !!moot}
         value={text}
         onChange={(e) => setText(e.target.value)}
         onBlur={commit}
@@ -68,91 +98,57 @@ function LimitRow({
 }
 
 /**
- * A figure that is watched rather than capped, drawn deliberately unlike the rows above it.
+ * The one row on this panel that is not a number.
  *
- * No input and no "of", because there is no ceiling to be of. The owner's reading is that subagents
- * are background tools a session reaches for rather than agent work holding a window open, so the
- * board shows how many there are and limits none of them. Drawn as a row all the same so the number
- * sits with the ceilings it used to be silently folded into.
+ * A select rather than a checkbox, and rather than the number box beside it, because the answer is
+ * two words and both of them should be readable without interacting with the control. A checkbox
+ * says yes by being filled in and no by being empty, which is a thing the reader has to already
+ * know; "Yes" and "No" are the answer written down. It sits in the same 52px column as the number
+ * boxes so the five rows still line up as one panel.
  *
- * A dash rather than a number when the server has not sent one. A server older than this panel
- * sends no figure at all, and drawing that as "0" would be the app asserting an emptiness it has
- * not been told about, which is the one thing it may never do.
+ * Committed on change rather than on blur, unlike `LimitRow`. There is no half-typed state to wait
+ * out: a select has only ever been at one of its two answers.
  */
-function WatchedRow({
+function LimitChoice({
   label,
   hint,
-  count,
-  locked,
-}: {
-  label: string
-  hint: string
-  count: number | undefined
-  /** True on a guest tab. This row has nothing to disable, so the lock is only a look here. */
-  locked: boolean
-}) {
-  return (
-    <div className={`rail-limit-row ${locked ? 'is-locked' : ''}`} title={hint}>
-      <span className="rail-limit-row__label">
-        {label}
-        <em>no limit</em>
-      </span>
-      <span className="rail-limit-row__watched">{count === undefined ? '—' : count}</span>
-    </div>
-  )
-}
-
-/**
- * How long an owner may be quiet before `owner_silent` is a reason that can be used.
- *
- * Its own row rather than a fourth `LimitRow`, because a `LimitRow` is a ceiling with a count
- * against it and this is neither: nothing is counted against it, and it is minutes rather than a
- * number of things. Its range is wider for the same reason, since a working day is well past the
- * 200 a card count is capped at.
- */
-function SilenceRow({
   value,
+  unit,
   locked,
   onCommit,
 }: {
-  value: number | undefined
+  label: string
+  hint: string
+  /** Undefined where the server has not sent one, which reads as yes rather than as no. */
+  value: boolean | undefined
+  unit?: string
   locked: boolean
-  onCommit: (n: number) => void
+  onCommit: (v: boolean) => void
 }) {
-  const [text, setText] = useState(value === undefined ? '' : String(value))
-  useEffect(() => setText(value === undefined ? '' : String(value)), [value])
-
-  const commit = () => {
-    const n = Math.round(Number(text))
-    if (!Number.isFinite(n) || n < 1 || n > 10080) {
-      setText(value === undefined ? '' : String(value))
-      return
-    }
-    if (n !== value) onCommit(n)
-  }
-
   return (
-    <label
-      className={`rail-limit-row ${locked ? 'is-locked' : ''}`}
-      title="How long an owner's last recorded activity may be before a reassignment for owner_silent will be accepted. Minutes."
-    >
+    <label className={`rail-limit-row ${locked ? 'is-locked' : ''}`} title={hint}>
       <span className="rail-limit-row__label">
-        Silence before silent
-        <em>{value === undefined ? 'not reported by this server' : 'minutes'}</em>
+        {label}
+        {unit ? <em>{unit}</em> : null}
       </span>
-      <input
-        type="number"
-        min={1}
-        max={10080}
+      <select
+        className="rail-limit-row__choice"
         disabled={locked}
-        placeholder="—"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') e.currentTarget.blur()
-        }}
-      />
+        /*
+         * Only an explicit false reads as No, so a server that has not been rebuilt since this
+         * field arrived sends nothing and the row shows Yes.
+         *
+         * `value ? 'yes' : 'no'` was the obvious line and it fails in the one direction that
+         * matters: against an older server the row sat on No, refused to move off it, and looked
+         * like a broken control rather than like a field the server had never heard of. The owner
+         * hit exactly that: "i cant change sub agents allowed from no to yes".
+         */
+        value={value === false ? 'no' : 'yes'}
+        onChange={(e) => onCommit(e.target.value === 'yes')}
+      >
+        <option value="yes">Yes</option>
+        <option value="no">No</option>
+      </select>
     </label>
   )
 }
@@ -176,10 +172,9 @@ export function LimitsPanel({
   projectId: string
   limits: BoardLimits
   /*
-   * `subagents` is optional here on purpose, and it is the only optional field. The one line that
-   * widens this type where it is stored lives in a file another card is holding, so this panel has
-   * to typecheck against both the old shape and the new one until that lands. The row draws a dash
-   * when it is missing, which is what it should draw against an older server anyway.
+   * `subagents` is carried but not drawn. It is a per-project count of records and the row above is
+   * a per-card ceiling, so putting them together would assert a ratio neither number supports. It
+   * stays in the type because the server sends it and dropping it here would only hide that.
    */
   counted: { cards: number; running: number; subagents?: number }
 }) {
@@ -224,6 +219,26 @@ export function LimitsPanel({
   return (
     <div className="rail-limits">
       {/*
+        Every row carries a line under its label, and only two of those lines are counts.
+
+        A blind reader called the old section uneven, and the first answer to that was to leave it
+        uneven and say why: only two of the five have a count that is a board figure, and the
+        board's subagent total beside a per-card allowance would read as "12 of 5", which is this
+        panel asserting a relationship between two numbers that have none.
+
+        Two more blind readers, given only the panel, showed that leaving it there cost more than
+        the tidiness. Neither could tell whether the boxes on the three uncounted rows were limits
+        or current readings, and both independently named the spawn limit as the row they would be
+        least willing to change, because "4" with no unit might be four parents, four spawns each,
+        or four at a time. That is not a layout complaint. That is three rows the owner cannot
+        safely edit.
+
+        So the line is now a count where a count exists and a unit where one does not. A unit is a
+        fact about the field rather than a measurement of the board, so it cannot be stale, cannot
+        be invented, and cannot imply a ratio. The column reads evenly because every row now says
+        something true, not because a number was borrowed to fill a gap.
+      */}
+      {/*
         "Agent cards", not "cards", because that is what the server counts.
 
         This said "Cards on this board" and its hint said every open card counts whatever it is
@@ -248,29 +263,85 @@ export function LimitsPanel({
         locked={locked}
         onCommit={(n) => commit({ cardsPerProject: n })}
       />
-      <WatchedRow
-        label="Subagents"
-        hint="Spawned agents belonging to the cards above, kept as records rather than drawn on the board. Nothing limits how many there may be: they are background tools a session uses, not agent work holding a context window open."
-        count={counted.subagents}
-        locked={locked}
-      />
       <LimitRow
-        label="Running at once"
+        label="Agent cards running at once"
         hint="Cards with a live process, on this project's board. A card made switched off does not count until it is turned on."
         value={limits.running}
         counted={counted.running}
         locked={locked}
         onCommit={(n) => commit({ running: n })}
       />
+      {/*
+        The five rows are five different mechanisms and only this one is refused by Garden itself.
+
+        Canon 15 says that out loud because a panel of near-identical controls implies one authority
+        behind all of them, and there are three: the server refuses cards and starts, the CLI holds
+        the concurrency figure below, and this row is held by Garden's own hook, which denies the
+        dispatch tool before the subagent exists. The hint has to carry that difference, since the
+        controls cannot.
+
+        Yes or no rather than a figure, since 2026-09-09: "change 'subagents allowed' to be yes or
+        no since subagents are disposable i dontw ant to create a cap for how many iit can create
+        its whole life". It shipped for about an hour as a lifetime count. The shape was the fault
+        rather than the number, and being the odd control on a panel of number boxes is the point:
+        this row asks a different kind of question from the four around it.
+      */}
+      <LimitChoice
+        label="Subagents allowed"
+        hint="Whether cards on this board may dispatch subagents at all. This is the one subagent decision Garden holds itself: its hook refuses the dispatch before the subagent exists, and says which card was refused and where to change this. Set to No it takes effect on the very next dispatch, including on a card that is already running, which is what makes it different from a card's own permission to spawn agents. Nothing already running is stopped and no record is removed."
+        value={limits.subagentsAllowed}
+        unit="everywhere on this board"
+        locked={locked}
+        onCommit={(v) => commit({ subagentsAllowed: v })}
+      />
+      {/*
+        A figure that can be changed, since 2026-09-09: "make sub agents field modifiable, its
+        currently static and limits cant be changed". It was drawn as a watched number with the words
+        "no limit" beside it, which was accurate and read as broken.
+
+        Garden does not hold it. The CLI does, from the settings file Garden writes for a card when
+        it launches, so the hint says at launch rather than letting the row imply that typing here
+        reaches a card already running.
+
+        Its label moved from "Subagents allowed" to "Subagents at once" on 2026-09-09 and its
+        meaning did not move with it. The row above took the old name because the owner gave that
+        name to the permission, and leaving two rows both called "allowed" would have made the panel
+        unreadable in the one place it now has two subagent settings.
+
+        No "n of m" beside the label, unlike the rows around it. The board's subagent count is per
+        project and this figure is per card, so the two do not divide, and a row reading "12 of 5"
+        would be the panel inventing a relationship between two numbers that have none.
+      */}
       <LimitRow
-        label="Children per card"
-        hint="How many a single card may have reporting to it, when that card has not set a figure of its own."
+        label="Subagents at once"
+        moot={limits.subagentsAllowed === false ? 'nothing to cap, subagents are off' : undefined}
+        hint="How many subagents one card may run at the same moment. Garden does not enforce this: it writes the number into the card's settings file when the card launches and the CLI holds it, which is why it reaches cards turned on after the change rather than one already running. It caps how many run at the same moment; whether a card may dispatch one at all is the row above. A card given its own team size is held to that instead of this."
+        value={limits.subagents}
+        counted={null}
+        unit="per card, at any one moment"
+        locked={locked}
+        onCommit={(n) => commit({ subagents: n })}
+      />
+      {/*
+        The owner's name for `childrenPerCard`, and a hint that does not repeat the name back as a
+        claim.
+
+        He asked for "Orchestrator Spawn Limit ... which refers to how many cards orchestrator can
+        spawn", and the orchestrator is the card that does nearly all the spawning here, so the name
+        is his and it is a fair name. The field is wider than the name: it governs any parent that
+        set no team size of its own. Canon 15 revision 7 settles the two against each other by
+        saying a label is a name and a hint is a claim, so the name stays his and the hint says what
+        the field actually does. The behaviour is not narrowed to match the label.
+      */}
+      <LimitRow
+        label="Orchestrator spawn limit"
+        hint="How many cards one card may have reporting to it, when that card has not set a team size of its own. Named for the orchestrator because that is the card that does the spawning on this board, but it holds any parent that set no figure of its own."
         value={limits.childrenPerCard}
         counted={null}
+        unit="per parent card, at any one moment"
         locked={locked}
         onCommit={(n) => commit({ childrenPerCard: n })}
       />
-      <SilenceRow value={silenceOf(limits)} locked={locked} onCommit={(silenceMinutes) => commit({ silenceMinutes })} />
       {/*
         The server's sentence, under the rows that caused it.
 

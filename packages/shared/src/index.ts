@@ -94,6 +94,30 @@ export function drawnOnBoard(card: { kind: CardKind; closedAt: number | null }):
 }
 
 /**
+ * May this card dispatch a subagent? Asked once, answered the same way everywhere.
+ *
+ * There are three inputs and they are not interchangeable, which is the reason this is a function
+ * rather than three `&&`s written out at each call site. The two call sites are the deny list in
+ * the settings file, written at launch, and Garden's own hook, asked per dispatch. They have to
+ * agree: a card launched with `Agent` denied and a hook that would have allowed it is a card the
+ * owner turned on and cannot fix without restarting it.
+ *
+ * The card's own answer wins outright, in both directions, because that is what the owner asked
+ * this control for: one board where one card has subagents and another does not.
+ *
+ * A card that has not answered follows the board, and is still held to `canSpawnAgents`. That flag
+ * means may this card hire agents at all, and a card told no there must not gain subagents from
+ * having said nothing here. Canon 15, "A card may answer for itself, and its answer wins".
+ */
+export function subagentsAllowedFor(
+  card: { subagentsAllowed: boolean | null; canSpawnAgents: boolean },
+  boardAllows: boolean,
+): boolean {
+  if (card.subagentsAllowed !== null) return card.subagentsAllowed
+  return boardAllows && card.canSpawnAgents
+}
+
+/**
  * The statuses a card has while something is actually running behind it.
  *
  * Here rather than in the server's SQL, because the header and the ceiling both answer "how many
@@ -247,6 +271,26 @@ export interface TerminalSession {
    */
   canSpawnAgents: boolean
   canUseTeams: boolean
+  /**
+   * Whether THIS card may dispatch subagents, overriding the board's answer.
+   *
+   * Three states, and the third one is the point. Null means this card has not answered and the
+   * board's `BoardLimits.subagentsAllowed` decides; true and false are this card overruling it in
+   * either direction. The owner asked for exactly that: "make individual card controls override the
+   * global cieling if the user wants one card to have sub agents/not the other".
+   *
+   * A boolean would have been the obvious field and would have broken the feature on the day it
+   * shipped. Every existing card would have arrived as an explicit yes, so a board set to no would
+   * have been overridden by every card on it and the ceiling row would have refused nothing while
+   * appearing to work. A card that has never been touched has to be silent rather than agreeing.
+   *
+   * Not `canSpawnAgents` above, which asks whether this card may hire agents and is checked where a
+   * hire is requested. One control answering two questions leaves no way to say "hires nobody, but
+   * dispatches subagents". `canSpawnAgents` set to false still denies the dispatch tool, so a card
+   * that may not hire at all does not quietly gain subagents from this field being unset. Canon 15,
+   * "A card may answer for itself, and its answer wins".
+   */
+  subagentsAllowed: boolean | null
   /** Reasoning effort, as reported by the CLI. Null until it says, never assumed. */
   effort: string | null
   /**
@@ -556,6 +600,20 @@ export interface WorkRecord {
   endedAt: number | null
   /** Files written during this turn, from PostToolUse on Write/Edit. Structured, never guessed. */
   filesTouched: string[]
+  /**
+   * Tasks that reached a terminal state while this turn was open.
+   *
+   * The other half of what a turn can have done, and the half history had no way to see. A card
+   * that spent a turn checking somebody's work, answered, and moved `T-12` to done wrote no file,
+   * so `filesTouched` was empty and the turn left no trace at all.
+   *
+   * Written only from the server's own task transition, the one that follows a delivered `done` or
+   * `confirm`, never from an agent saying it had finished something. That is the same grade of fact
+   * as `filesTouched`: a row in the task table with a time on it, checkable afterwards by anything
+   * that can read the database. Empty on nearly every turn, and empty on every row written before
+   * this field existed.
+   */
+  tasksCompleted: string[]
   toolCalls: number
 }
 
@@ -852,6 +910,12 @@ export type ClientMessage =
       roleClass?: RoleClass | null
       canSpawnAgents?: boolean
       canUseTeams?: boolean
+      /**
+       * This card's own answer about subagents. Null is not "no": it is the card withdrawing its
+       * answer and following the board again, which is why this field has to be sent explicitly to
+       * mean anything and an absent field changes nothing.
+       */
+      subagentsAllowed?: boolean | null
       teamSize?: number | null
       modelChoice?: string | null
       effortChoice?: string | null
@@ -1358,9 +1422,10 @@ export type ServerMessage =
    * The counts travel with the limits so the board can say "four of twelve" rather than making the
    * owner count cards himself, and so a refusal he reads names the same figures the control shows.
    *
-   * `subagents` has no limit anywhere and is not one: it is a figure the panel shows on its own, so
-   * that the cards number stays the one he can check by looking at the board. There is deliberately
-   * no `BoardLimits.subagents` to go with it.
+   * `counted.subagents` is how many subagent records this project holds, and it is not counted
+   * against `limits.subagents`. They are different questions: the limit is how many one card may run
+   * at once, the count is how many the whole board has ever been told about. The panel draws no
+   * "n of m" for that row for exactly this reason, since the two numbers do not divide.
    */
   | {
       t: 'limits'
@@ -1417,15 +1482,16 @@ export type ServerMessage =
  * The skills a role keeps. Everything else installed on the machine is denied to it.
  *
  * A keep list rather than a deny list, and the direction is the point. The skills directory is
- * shared by every project on the machine, so it holds work for repositories this one has never
- * heard of: a 3D preview convention, a game engine bridge, whatever else happens to be installed.
- * Naming those here to deny them would mean editing this table every time a skill is written for
- * something else, and the failure would be silent, because a skill nobody remembered to deny
- * simply shows up. Listing what a role keeps fails the other way: something new is unavailable
- * until somebody decides it belongs, which is a decision rather than an oversight.
+ * shared by every project on this machine, so it holds work for repositories this one has never
+ * heard of: a Blender preview convention, a Unity editor bridge. Naming those here to deny them
+ * would mean this table needed editing every time the owner wrote a skill for something else, and
+ * the failure would be silent, because a skill nobody remembered to deny simply shows up. Listing
+ * what a role keeps fails the other way: something new is unavailable until somebody decides it
+ * belongs, which is a decision rather than an oversight.
  *
- * The owner's words, from the first time he raised it: "each window should only have the roots for
- * its role/function", so a card does not carry a skill that is outside its own scope.
+ * His words, from the first time he raised it: "each window should only have the roots for its
+ * role/function. so you technically dont need blender-prop-review because its outside of your
+ * scope."
  *
  * The per-role differences are not tidiness either. Canon already claims a worker cannot run a
  * blind pass and a manager may not write canon, and both were true only because a related tool
@@ -1660,6 +1726,60 @@ export interface BoardLimits {
   /** How many a single card may have reporting to it, when it has set no figure of its own. */
   childrenPerCard: number
   /**
+   * How many subagents one card may run at once. The owner's words: "the number of subagents a card
+   * is allowed to spawn for itself".
+   *
+   * The one limit in this interface that Garden does not check anywhere, and it must never be
+   * described as though it does. Garden learns about a subagent from `SubagentStart`, which the CLI
+   * fires after its own dispatch, so a check there would be refusing to record something already
+   * running. What holds this number is the CLI: it goes into the card's settings file at launch as
+   * `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` (`server/src/hooks-install.ts`), the same file that
+   * carries the deny list, and the CLI enforces its own rule. One authority for permissions, stated
+   * in that authority's language.
+   *
+   * Two things it does not do, both of which a brief quoting it has to say out loud. It caps how
+   * many run at the same moment, not how many a card spawns over a session, so five allowed means
+   * five at a time and this field counts no totals. Whether a card may dispatch at all is
+   * `subagentsAllowed` below: a different field, held by a different authority, and the two must
+   * never be described as one number. See `docs/canonical/15-guardrails.md`. And it lands at
+   * launch, because that is when the CLI reads settings, so changing it here reaches cards turned
+   * on afterwards rather than one already going.
+   *
+   * A card that set its own `teamSize` is held to that; this is the fallback for a card that set
+   * none, the same shape `childrenPerCard` has.
+   *
+   * Added on 2026-09-09 because the owner found the figure beside them was not editable: "make sub
+   * agents field modifiable, its currently static and limits cant be changed", then named what it
+   * should mean. It was briefly a retention cap that deleted the oldest spent records, which canon
+   * 15 forbids in as many words: a limit refuses, it never removes.
+   */
+  subagents: number
+  /**
+   * Whether cards on this board may dispatch subagents at all.
+   *
+   * Yes or no, not a number, and the only subagent decision Garden holds itself. `subagents` above
+   * is the CLI's concurrency cap and says nothing about permission; this says whether there is
+   * anything to be concurrent about.
+   *
+   * What holds it is Garden's own hook, at `PreToolUse`, refusing the dispatch tool before the
+   * subagent exists. That is the only point at which it can be held: Garden hears about a subagent
+   * through `SubagentStart`, which the CLI fires after its own dispatch, so a check anywhere later
+   * would be refusing to record something already running. Canon 15 sets this out in "The five
+   * rows, and what holds each one", including why three rows on one panel are three different
+   * mechanisms.
+   *
+   * It was a lifetime count for about an hour on 2026-09-09, and the owner rejected the shape
+   * rather than the figure: "subagents are disposable i dontw ant to create a cap for how many iit
+   * can create its whole life". A lifetime cap prices a thing that costs nothing to throw away, and
+   * it bites hardest on the card that has been working longest, which is the wrong card to stop.
+   *
+   * Not the same thing as a card's own `SessionPowers.canSpawnAgents`, and both exist on purpose.
+   * That flag is chosen when a card is made and reaches the CLI in the settings file at launch, so
+   * changing it waits for the card to be turned on again. This is asked at the hook, per dispatch,
+   * so switching it off here stops the next dispatch on a card that is already running.
+   */
+  subagentsAllowed: boolean
+  /**
    * How many cards may be mid-turn at the same moment.
    *
    * A separate number from `running`, and it has to be. The owner's position is that being awake is
@@ -1798,6 +1918,22 @@ export const DEFAULT_LIMITS: BoardLimits = {
    */
   taskAuthority: 'shadow',
   silenceMinutes: 60,
+  /*
+   * Five subagents at a time per card, which is the CLI's own default rather than a figure invented
+   * here. A default that differed from the CLI's would change every card's behaviour the first time
+   * Garden launched it, and would do it silently, since nothing on screen would say the number had
+   * moved.
+   */
+  subagents: 5,
+  /*
+   * Subagents allowed, because this is the only setting on the panel that can stop work a card is
+   * already doing, and a board that arrived switched off would look like the CLI was broken.
+   *
+   * The same answer is the migration's default for boards that predate the column, and for a
+   * stronger version of the same reason: those cards are dispatching subagents today, and a
+   * migration that answered no would refuse their next one for a decision nobody made.
+   */
+  subagentsAllowed: true,
   /*
    * Manual, because canon 21 says an update pending is never on its own a reason to restart and
    * something has to authorize it. A board that came back from a restart already set to restart

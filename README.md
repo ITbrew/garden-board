@@ -6,24 +6,7 @@ Every agent you run is a card on a board. Cards are wired to each other, and the
 decoration: a wire is what permits one card to send anything to another, and a card's role is
 enforced by the CLI's own permission layer rather than by Garden asking nicely.
 
-This file is how to run it and how to use it. `DEVELOPMENT.md` is the architecture. **`CLAUDE.md` is
-written for the agents themselves**: point a Claude Code session at this repository and it can drive
-the board, hire cards, wire them and send between them without being taught any of it by hand.
-
----
-
-## What you need
-
-- **Windows 11.** Garden spawns real terminals through ConPTY and the launcher is PowerShell. It is
-  not portable today and nothing here pretends otherwise.
-- **Node 20 or newer**, and a C++ toolchain for `node-pty`, which is a native module.
-- **At least one CLI to put on the board.** Claude Code is the one with a full hook spine, so its
-  cards report status, token use and tool calls. Codex runs but draws as unmonitored, because it has
-  no hooks to report through.
-
-Garden keeps everything it owns in `~/.garden`: the SQLite database, each card's memory directory,
-the mailboxes, saved boards. Nothing is written inside your project folders except by the agents
-themselves.
+`DEVELOPMENT.md` is the architecture. This file is how to run it and how to use it.
 
 ---
 
@@ -50,28 +33,6 @@ saved restarts the process and kills every terminal you have open.** Use it when
 Garden and nothing else is running in it.
 
 The startup line tells you which one you are in. Nothing else does.
-
-### The launcher
-
-`scripts/launch.ps1` is what a desktop shortcut should point at. It starts whichever halves are not
-already up, waits for both ports to answer, and opens the app in its own Chrome window. It is safe to
-run twice and safe to run when only half of Garden is up.
-
-Two things it does that are worth knowing, because both were learned the hard way:
-
-- **It always replaces the page half.** Vite runs `strictPort`, so a surviving process keeps 5177 and
-  any replacement exits silently. A port answering told you nothing about how old the code behind it
-  was, and it served a six-hour-old build twice before this was fixed.
-- **It replaces the server half only when the version differs.** The server holds every card's
-  terminal, so reusing it is the whole reason a half-started Garden can be completed rather than
-  restarted. But reusing it unconditionally meant a new build could never reach the running app. It
-  now compares `/health` against `server/package.json` and restarts only when they disagree. If the
-  version cannot be read, it reuses: a failed request is not evidence of a stale server, and ending
-  every session over an unknown is the worst available guess.
-
-The version is in the header, and a chip reads `builds differ` when the two halves disagree.
-`scripts/restart-fresh.ps1` stops everything, rewrites the database and starts again, for the rare
-case where you need the file unlocked.
 
 ---
 
@@ -116,10 +77,8 @@ Wires are never changed by arranging the board. **Arranging is purely cosmetic.*
 
 ### Arranging, and getting your layout back
 
-Right-click empty canvas for **Tidy layout**. It spaces the cards out without changing a single
-wire. There were four named arrangements once (Web, Tree, Sequential, Waterfall) and they were taken
-out again: an arrangement that decides where your cards belong is an opinion, and the one job worth
-keeping is separating cards that overlap.
+Four arrangements: Web, Tree, Sequential, Waterfall. In every one, the card that everything came
+from is the one the eye lands on first, and further from it means further down the chain.
 
 A snapshot of every position is taken automatically, on the server, before any arrangement. The
 **Previous** button restores it and survives a reload, a restart and a different browser window. You

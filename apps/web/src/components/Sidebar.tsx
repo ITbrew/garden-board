@@ -8,7 +8,7 @@ import { LimitsPanel } from './LimitsPanel'
  * document. What went is this file's use of them.
  */
 
-export function Sidebar() {
+export function Sidebar({ onFold }: { onFold?: () => void }) {
   const projects = useApp((s) => s.projects)
   const sessions = useApp((s) => s.sessions)
   const activeProjectId = useApp((s) => s.activeProjectId)
@@ -133,6 +133,22 @@ export function Sidebar() {
 
   return (
     <aside className="rail">
+      {/*
+        The fold control belongs to the rail, not to the header.
+
+        It was in the top bar first, and the owner's correction is the general rule rather than a
+        preference: "it shoudl be connected to the bar it collapses". A control sitting in one
+        region that acts on another has to be learned; one attached to the thing it moves does not.
+
+        Pinned to the rail's own top-right corner, so it is where a window's minimise is. What puts
+        it back is a tab at the edge of the canvas, drawn by App, because this whole element is gone
+        once it folds and a control that disappears with the thing it hides can never undo itself.
+      */}
+      {onFold && (
+        <button className="rail-fold" title="Hide this bar" aria-label="Hide this bar" onClick={onFold}>
+          ‹
+        </button>
+      )}
       <section className="rail-section">
         <h3 className="rail-title">New terminal</h3>
         <div className="launchers">
@@ -211,17 +227,24 @@ export function Sidebar() {
       <section className="rail-section">
         <h3 className="rail-title">Layouts</h3>
         <div className="launchers">
-          {automatic && (
-            <button
-              className="btn btn--wide"
-              title={`Put every card back where it was before the last arrangement, saved ${new Date(
-                automatic.savedAt,
-              ).toLocaleTimeString()}`}
-              onClick={() => actions.restoreLayout(automatic.id)}
-            >
-              Previous
-            </button>
-          )}
+          {/*
+            Tidy, first, because it is the one arrangement that survived and the rail is where the
+            owner looks for it: "add 'tidy layout' from right click to the layouts section".
+
+            The same action the board's own right-click menu runs, calling `actions.tidyBoard`, not a
+            second implementation of packing. Two buttons that repack a board slightly differently is
+            how the arrangement styles that were removed from this rail got their reputation.
+
+            Previous sits below the saved boards and undoes whichever of them was pressed.
+          */}
+          <button
+            className="btn btn--wide"
+            disabled={!active}
+            title="Repack every card on this board into rows, keeping nothing but the order they are in. Previous puts them back."
+            onClick={() => active && actions.tidyBoard(active.id)}
+          >
+            Tidy layout
+          </button>
           {saved.map((l) => (
             <div key={l.id} className="layout-row">
               <button
@@ -244,6 +267,27 @@ export function Sidebar() {
               </button>
             </div>
           ))}
+          {/*
+            Previous under the buttons it undoes, at the owner's instruction on 2026-09-10: "re
+            order layout section 1. tidy 2. web 3. previous 4. save."
+
+            The "web" in his list is a board he saved by name, not an arrangement style: those are
+            gone from every surface (canon 02) and none came back. So the order is Tidy, his saved
+            boards, then the way back from whichever was just pressed, then Save, which is the only
+            button here that changes nothing on screen. Previous sat second until now, which put the
+            undo above the thing it undoes.
+          */}
+          {automatic && (
+            <button
+              className="btn btn--wide"
+              title={`Put every card back where it was before the last arrangement, saved ${new Date(
+                automatic.savedAt,
+              ).toLocaleTimeString()}`}
+              onClick={() => actions.restoreLayout(automatic.id)}
+            >
+              Previous
+            </button>
+          )}
           <button
             className="btn btn--wide"
             disabled={!active}

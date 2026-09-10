@@ -1,9 +1,9 @@
 # Garden: development notes
 
-A node-graph control room for AI CLI sessions. Windows 11.
+A node-graph control room for AI CLI sessions. Windows 11, personal use only.
 
-This file tracks what is actually built, as against what was intended. Where the two differ it says
-so rather than quietly describing the plan.
+This file tracks what is actually built, as against what was intended. Where the two differ it
+says so rather than quietly describing the plan.
 
 ## Running it
 
@@ -778,8 +778,8 @@ this app is worth using.
 
 ## Decided, not yet built: a wire has to tell the agent it exists
 
-Drawing a wire from a tool-specific MCP session to the project's main agent should make the main
-agent aware it can hand that kind of work over. That does not happen for free: an agent cannot see the
+Drawing a wire from a Blender MCP session to the project's main agent should make the main agent
+aware it can hand Blender work over. That does not happen for free: an agent cannot see the
 canvas, so a line on screen means nothing to it until something tells it.
 
 A wire between two session cards therefore does three things:

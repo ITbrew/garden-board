@@ -141,10 +141,17 @@ export type SessionNodeData = {
   contextOpen: boolean
   /** And the same for the history block above it, so its dot can fold as well as unfold. */
   historyOpen: boolean
+  /**
+   * Refusals this card has collected. Zero for almost every card.
+   *
+   * The pill that holds them folds away with the history now, so this is what stops the fold hiding
+   * the fact that they exist. Canon 15: a refusal is never silent, and a fold is not an exception.
+   */
+  refusalCount: number
 }
 
 export const SessionNode = memo(function SessionNode({ data, selected }: NodeProps) {
-  const { session, project, account, focused, width, height, contextOpen, historyOpen } =
+  const { session, project, account, focused, width, height, contextOpen, historyOpen, refusalCount } =
     data as SessionNodeData
   const [powersOpen, setPowersOpen] = useState(false)
   /*
@@ -335,12 +342,22 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
         : `running as ${session.roleClassRunning}`
       : null
 
+  /*
+   * The card's own answer first, because it is the one that beats the board and the summary is the
+   * only place it shows while the settings are folded away. A card that follows the board says
+   * nothing about subagents here: the board's answer is on the board, and repeating it on every
+   * card would be a second place to read one fact and a second place for it to go stale.
+   */
   const hiringBit =
-    !session.canSpawnAgents || session.teamSize === 0
-      ? 'hires nobody'
-      : session.teamSize
-        ? `hires ${session.teamSize} at a time`
-        : 'no hiring cap'
+    session.subagentsAllowed === false
+      ? 'no subagents'
+      : !session.canSpawnAgents || session.teamSize === 0
+        ? 'hires nobody'
+        : session.subagentsAllowed === true && session.teamSize === null
+          ? 'subagents on'
+          : session.teamSize
+            ? `hires ${session.teamSize} at a time`
+            : 'no hiring cap'
 
   /*
    * No "answers to" here.
@@ -510,7 +527,16 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
         onResizeEnd={(_e, params) => actions.setSessionBox(session.id, params.width, params.height)}
       />
     <div
-      className={`node ${selected ? 'is-selected' : ''} ${focused ? 'is-focused' : ''} ${off ? 'is-off' : ''} ${session.status === 'working' ? 'is-busy' : ''}`}
+      /*
+       * `is-tinted` says the colour was CHOSEN, which is not the same as the card having one.
+       *
+       * Every card has a `--role-color` below, because an adapter with no colour set still falls
+       * back to one, and that fallback is what paints the header edge on the majority of cards.
+       * Painting the whole card from it would therefore retheme every card on the board the moment
+       * this landed, which is the opposite of what was asked. So the class is the signal, the
+       * property is the value, and a card the owner has never coloured looks exactly as it did.
+       */
+      className={`node ${selected ? 'is-selected' : ''} ${focused ? 'is-focused' : ''} ${off ? 'is-off' : ''} ${session.status === 'working' ? 'is-busy' : ''} ${session.color ? 'is-tinted' : ''}`}
       style={
         {
           width,
@@ -522,6 +548,11 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
            * travels around the border while it is working. A coder, an orchestrator and a
            * reviewer therefore light up in different colours, so what a busy card is FOR is
            * readable from across the board without reading a word on it.
+           *
+           * When the owner has chosen a colour rather than inherited one, this same property is
+           * also the whole card's theme: all four border edges, a tint under the header and a
+           * fainter one under the body, all mixed from this one value in `styles.css`. One
+           * property and one class, so a colour never has to be plumbed to a second place.
            */
           '--role-color': session.color ?? ADAPTER_COLOR[session.adapterId] ?? '#7c5cff',
         } as CSSProperties
@@ -764,20 +795,62 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
                       </label>
 
                       {/*
-                        Named for what it actually controls.
+                        This card's own answer about subagents, which beats the board's.
 
-                        The only thing the CLI enforces for a non-zero value is how many agents run at
-                        the same time, not how many get hired over a session. A row labelled "team
-                        size" beside a value reading "3 at a time" still gets read as a team of three,
-                        so the label carries the qualifier too. Disabled when hiring is off, since the
-                        two controls express the same hard stop and must never disagree on screen.
+                        Three options and not a checkbox, and the third one is the whole feature: the
+                        owner asked for a board where one card has subagents and another does not,
+                        "make individual card controls override the global cieling if the user wants
+                        one card to have sub agents/not the other". A checkbox has two states, so one
+                        of them would have to double as "has not answered", every card ever made
+                        would read as an explicit yes, and a board set to no would be overridden by
+                        every card on it. Canon 15, "A card may answer for itself, and its answer
+                        wins".
+
+                        Not the same row as May hire agents above. That one asks whether this card
+                        may hire agents at all and is checked where a hire is requested; this one is
+                        asked at the hook on every dispatch, so switching it to No reaches a card
+                        that is already running rather than waiting for it to be turned on again.
                       */}
                       <label className="node-powers__row">
-                        <span title="The CLI caps how many run at the same time. Nothing caps how many are hired over a whole session, so the total is a request rather than a rule.">
-                          Helpers at a time
+                        <span title="Whether this card may dispatch subagents, whatever the board's ceiling says. Follow the board is the default and means it has no opinion. Yes and No are this card overruling the board in either direction, and both take effect on the very next dispatch, including on a card that is already running.">
+                          Subagents allowed
                         </span>
                         <select
-                          disabled={!session.canSpawnAgents}
+                          value={session.subagentsAllowed === null ? '' : session.subagentsAllowed ? 'yes' : 'no'}
+                          onChange={(e) =>
+                            actions.setSessionRole(session.id, {
+                              subagentsAllowed: e.target.value === '' ? null : e.target.value === 'yes',
+                            })
+                          }
+                        >
+                          <option value="">follow the board</option>
+                          <option value="yes">yes, whatever the board says</option>
+                          <option value="no">no, whatever the board says</option>
+                        </select>
+                      </label>
+
+                      {/*
+                        Named for what it actually controls.
+
+                        The only thing the CLI enforces for a non-zero value is how many run at the
+                        same time, not how many get hired over a session. A row labelled "team size"
+                        beside a value reading "3 at a time" still gets read as a team of three, so
+                        the label carries the qualifier too. Disabled when hiring is off, since the
+                        two controls express the same hard stop and must never disagree on screen,
+                        and disabled again when this card has said no to subagents, since there is
+                        then nothing for a figure to cap.
+
+                        The empty option used to read "no cap set, the CLI allows 20", which
+                        described the CLI rather than this board and stopped being true the day the
+                        ceiling grew a figure of its own. A card with no figure falls back to the
+                        board's, which is what it now says.
+                      */}
+                      <label className="node-powers__row">
+                        <span title="How many subagents this card may run at the same moment, which overrides the board's figure. It reaches the card in its settings file at launch, so it applies the next time this card is turned on rather than mid-turn.">
+                          Subagents at once
+                        </span>
+                        <select
+                          disabled={!session.canSpawnAgents || session.subagentsAllowed === false}
                           value={session.teamSize === null ? '' : String(session.teamSize)}
                           onChange={(e) =>
                             actions.setSessionRole(session.id, {
@@ -785,7 +858,7 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
                             })
                           }
                         >
-                          <option value="">no cap set, the CLI allows 20</option>
+                          <option value="">follow the board</option>
                           <option value="0">0, may not hire at all</option>
                           {[1, 2, 3, 4, 5, 6, 8, 10].map((n) => (
                             <option key={n} value={String(n)}>
@@ -1389,7 +1462,9 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
           title={
             historyOpen
               ? 'Fold this history away'
-              : 'History: what this session has done, opened above the card'
+              : refusalCount > 0
+                ? `History, and ${refusalCount} refusal${refusalCount === 1 ? '' : 's'} folded behind it`
+                : 'History: what this session has done, opened above the card'
           }
           // Pressing it again folds the block away, the same as the roots dot below. Only the
           // bottom one ever toggled, so the top one kept reopening a block that was already there.
@@ -1400,7 +1475,16 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
         >
           ▲
         </button>
-        <span className="port-label port-label--top">{historyOpen ? 'Fold away' : 'History'}</span>
+        {/*
+          The label says the refusals are there while they are folded, and it is the only thing that
+          does. The arrow was marked as well at first and the owner said no: "i dotn want the button
+          to be red for history refused". He is right that the colour was the weaker half. Canon 15
+          requires that a refusal is never hidden, and a count in words satisfies that better than a
+          border does, because a colour has to be learned before it means anything.
+        */}
+        <span className="port-label port-label--top">
+          {historyOpen ? 'Fold away' : refusalCount > 0 ? `History · ${refusalCount} refused` : 'History'}
+        </span>
       </div>
 
       <div className="port port--bottom">

@@ -1,5 +1,5 @@
-import { useEffect, useSyncExternalStore } from 'react'
-import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from 'react-resizable-panels'
 import { drawnOnBoard, runningOnBoard } from '@garden/shared'
 import { adoptKeyFromUrl, conn } from './connection'
 import { actions, useApp } from './state'
@@ -15,6 +15,17 @@ export function App() {
   const connected = useApp((s) => s.connected)
   const lastError = useApp((s) => s.lastError)
   const focusedCount = useApp((s) => s.focused.length)
+  /*
+   * The rail's own handle, and a copy of whether it is folded.
+   *
+   * The handle is what folds it; the boolean only drives which way the button points. They are kept
+   * apart deliberately: the panel is the authority on its own state and reports through onCollapse
+   * and onExpand, so dragging the rail shut turns the button around too. A single piece of state
+   * driving the panel instead would make the button and the drag two ways of setting the same thing
+   * and let them disagree.
+   */
+  const railRef = useRef<ImperativePanelHandle>(null)
+  const [railCollapsed, setRailCollapsed] = useState(false)
   /*
    * Cards on the board, and separately how many of them are running.
    *
@@ -228,9 +239,47 @@ ${
 
       {/* Every boundary here is a drag handle, per the ultrawide layout requirement. */}
       <PanelGroup direction="horizontal" className="body" autoSaveId="garden-body">
-        <Panel defaultSize={16} minSize={0} maxSize={40} className="pane">
-          <Sidebar />
+        {/*
+          `collapsible` rather than only `minSize={0}`: the panel then has a collapsed state of its
+          own that the button can ask about and toggle, and dragging it shut snaps rather than
+          leaving a two-pixel sliver that is neither open nor closed.
+        */}
+        <Panel
+          ref={railRef}
+          defaultSize={16}
+          minSize={10}
+          maxSize={40}
+          collapsible
+          collapsedSize={0}
+          onCollapse={() => setRailCollapsed(true)}
+          onExpand={() => setRailCollapsed(false)}
+          className="pane"
+        >
+          {/*
+            The fold control is drawn by the rail, in the rail's own top-right corner, on the owner's
+            correction: "it shoudl be connected to the bar it collapses". The way back is the tab
+            below, because this element and its button are gone once the panel is at zero.
+          */}
+          <Sidebar onFold={() => railRef.current?.collapse()} />
         </Panel>
+        {/*
+          The way back, and it cannot live in the rail.
+
+          A fold button attached to the thing it hides can hide itself and then there is nothing to
+          press. So the rail owns closing and this tab owns opening: it appears against the window
+          edge exactly when the rail is at zero, which is also the moment the resize divider stops
+          looking like anything a person would think to drag.
+        */}
+        {railCollapsed && (
+          <button
+            className="rail-unfold"
+            title="Show the bar"
+            aria-label="Show the bar"
+            onClick={() => railRef.current?.expand()}
+          >
+            ›
+          </button>
+        )}
         <PanelResizeHandle className="resize-h" />
         <Panel minSize={30} className="pane">
           <PanelGroup direction="vertical" autoSaveId="garden-center">

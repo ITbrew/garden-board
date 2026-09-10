@@ -317,6 +317,18 @@ export function getHistoryGroups(sessionId: string) {
   return historyGroups.get(sessionId)
 }
 
+/**
+ * Drop what we know about a card's history days, and tell anything drawing them.
+ *
+ * Days are not cards. They come from a `history.groups` answer and are drawn from that answer, so
+ * nothing the server broadcasts on close can clear them: it removes the turn cards it owns and has
+ * no message that says "and forget the days". Folding the block away has to forget them here.
+ */
+export function forgetHistoryGroups(sessionId: string) {
+  if (!historyGroups.delete(sessionId)) return
+  for (const fn of historySubs) fn(sessionId)
+}
+
 export function onHistoryGroups(fn: (sessionId: string) => void) {
   historySubs.add(fn)
   return () => {
@@ -1575,6 +1587,9 @@ export const actions = {
       roleClass?: TerminalSession['roleClass']
       canSpawnAgents?: boolean
       canUseTeams?: boolean
+      // Three states, so null is a value the card can send rather than an omission: it means this
+      // card withdraws its own answer and follows the board again.
+      subagentsAllowed?: boolean | null
       teamSize?: number | null
       modelChoice?: string | null
       effortChoice?: string | null
@@ -1735,8 +1750,19 @@ export const actions = {
     conn.send({ t: 'history.closeGroup', sessionId, group })
   },
 
+  /**
+   * Fold the whole history block away, days included.
+   *
+   * The local forget is the half that was missing, and without it history could not be folded away
+   * at all. `history.close` deletes the turn cards on the server and broadcasts their removal, but
+   * the days are not cards: they are drawn from the last `history.groups` answer, which the server
+   * has no reason to send again. So the turn cards went and the row of day pills stayed, and since
+   * the arrow reads "open" from the same set, it went back to reading "History" and reopened on the
+   * next press instead of folding.
+   */
   closeHistoryWeb(sessionId: string) {
     conn.send({ t: 'history.close', sessionId })
+    forgetHistoryGroups(sessionId)
   },
 
   /**

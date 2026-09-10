@@ -143,10 +143,18 @@ check(
   `counted.cards is ${shown?.counted?.cards}, board holds 3 cards and 5 subagents`,
 )
 check('subagents are counted on their own', shown?.counted?.subagents === 5, `counted.subagents is ${shown?.counted?.subagents}`)
+/*
+ * `limits.subagents` exists as of 2026-09-09 and this used to assert that it deliberately did not.
+ * What it means is not what the count above means, which is why the two are checked separately: the
+ * limit is how many subagents one card may run at once, held by the CLI through the settings file
+ * Garden writes at launch, and the count is how many records this whole board holds. The important
+ * property is the one below it: the server does not refuse anything against this number. Nine
+ * subagents are born past a figure of five later in this file, and none of them is refused.
+ */
 check(
-  'and carry no ceiling of their own',
-  shown?.limits !== undefined && shown.limits.subagents === undefined,
-  `limits: ${Object.keys(shown?.limits ?? {}).join(', ')}`,
+  'subagents now carry a figure of their own',
+  typeof shown?.limits?.subagents === 'number' && shown.limits.subagents > 0,
+  `limits.subagents is ${shown?.limits?.subagents}`,
 )
 
 // --- the failure he actually hit ---
@@ -175,6 +183,21 @@ for (let i = 6; i <= 9; i++) await dispatch(parent, i)
 const after = await limits()
 check('more subagents are still born past the card ceiling', after?.counted?.subagents === 9, `counted.subagents is ${after?.counted?.subagents}`)
 check('and none of that changed the card figure', after?.counted?.cards === CARD_CEILING, `counted.cards is ${after?.counted?.cards}`)
+
+/*
+ * And the figure refuses nothing, which is the property that matters about it.
+ *
+ * The board is past `limits.subagents` here and every dispatch above went through: the limit is
+ * held by the CLI at launch, through the settings file Garden writes, and the server never checks
+ * it. A version of this file asserted the two numbers merely differed, which passed or failed on a
+ * coincidence of defaults rather than on anything true.
+ */
+const past = await limits()
+check(
+  'the subagent figure refuses nothing on the server',
+  past?.counted?.subagents > past?.limits?.subagents,
+  `${past?.counted?.subagents} subagents exist against a figure of ${past?.limits?.subagents}, and none was refused`,
+)
 
 console.log(failures ? `\n${failures} failed` : '\nall good')
 await stop(failures ? 1 : 0)

@@ -101,6 +101,8 @@ body {
 /* --- left rail --- */
 
 .rail {
+  /* The fold button in the top-right corner is positioned against this. */
+  position: relative;
   width: 100%;
   background: var(--bg-panel);
   border-right: 1px solid var(--line);
@@ -195,6 +197,21 @@ body {
   text-align: right;
 }
 .rail-limit-row input:focus { outline: none; border-color: var(--accent); }
+/* The yes or no row. Same width, box and font as the number inputs beside it so the five rows read
+   as one panel, and left-aligned rather than right, because "Yes" is a word and the numbers are
+   figures: a right-aligned word under a right-aligned column of digits looks like a stray value. */
+.rail-limit-row__choice {
+  width: 52px;
+  flex: 0 0 auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 4px 6px;
+  font: 12px/1.2 'Cascadia Mono', Consolas, monospace;
+}
+.rail-limit-row__choice:focus { outline: none; border-color: var(--accent); }
+.rail-limit-row__choice:disabled { cursor: not-allowed; }
 /* A figure that is watched rather than capped: same column as the inputs so the rows line up, and
    deliberately without their box, since there is nothing here to type into. */
 .rail-limit-row__watched {
@@ -267,6 +284,99 @@ body {
 }
 .canvas-empty h2 { margin: 0 0 6px; font-size: 15px; color: var(--text-dim); font-weight: 600; }
 .canvas-empty p { margin: 0; font-size: 12.5px; }
+
+/* --- what a first-time user is shown --- */
+
+/*
+ * A corner panel, never a modal, and canon 23 gives the reason: every step it describes is done on
+ * the board, so covering the board to explain the board is self-defeating and the reflex a modal
+ * teaches is to dismiss it without reading.
+ *
+ * Bottom left, which is the one corner nothing else claims. The minimap is bottom right, the card
+ * controls are top right on the cards themselves, and the top left of the canvas is where the first
+ * card lands.
+ *
+ * Narrow on purpose. It holds one instruction at a time plus a list of titles, and a wide panel
+ * would invite the paragraphs that would make it a manual.
+ */
+.firstrun {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  z-index: 6;
+  width: 268px;
+  max-width: calc(100% - 28px);
+  background: var(--bg-panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.firstrun__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 8px 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.firstrun__head h2 {
+  margin: 0;
+  flex: 1;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+/* The count is the honest summary of the panel: how many of the six have actually happened. */
+.firstrun__count { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.firstrun__close {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.firstrun__close:hover { color: var(--text); border-color: var(--line); }
+.firstrun__close:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 1px; }
+
+.firstrun__list { list-style: none; margin: 0; padding: 8px 12px 12px; }
+.firstrun__step { display: flex; gap: 8px; padding: 3px 0; align-items: baseline; }
+.firstrun__mark {
+  width: 12px;
+  flex: none;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.firstrun__step.is-done .firstrun__mark { color: #4ade80; }
+.firstrun__text { min-width: 0; }
+.firstrun__title { font-size: 12.5px; color: var(--text-dim); }
+
+/*
+ * A done step is struck through rather than hidden. The list is short, and seeing what has already
+ * been covered is what makes the remaining count mean anything.
+ */
+.firstrun__step.is-done .firstrun__title { color: var(--text-faint); text-decoration: line-through; }
+
+/* The step being read is the only one with a body, and the only one at full strength. */
+.firstrun__step.is-next .firstrun__title { color: var(--text); font-weight: 600; }
+.firstrun__body {
+  margin: 3px 0 5px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
 
 /* --- session node --- */
 
@@ -720,8 +830,36 @@ body {
 .port > * { pointer-events: auto; }
 .port--left { left: -5px; top: 50%; transform: translateY(-50%); }
 .port--right { right: -5px; top: 50%; transform: translateY(-50%); }
-.port--top { left: 50%; top: -6px; transform: translateX(-50%); flex-direction: column; }
-.port--bottom { left: 50%; bottom: -6px; transform: translateX(-50%); flex-direction: column-reverse; }
+/*
+ * The two web buttons sit off the card, not on its edge.
+ *
+ * They used to straddle it, and the card's own resize line runs along that edge. The owner's report
+ * is exactly what that produces: "the history button overlaps the border of the card as well so when
+ * i try to collapse it, it resizes the card instead of collapsing histroy". The press was landing on
+ * the resizer, so the control did not merely feel hard to hit, it did something else instead.
+ *
+ * Anchoring the block outside the card (`bottom: 100%` above, `top: 100%` below) and reversing the
+ * stack keeps the wire pin against the card, where a connection should attach, and puts the button
+ * beyond it with nothing of the card underneath. Nothing competes for the press any more.
+ */
+.port--top {
+  left: 50%;
+  top: auto;
+  bottom: 100%;
+  padding-bottom: 2px;
+  transform: translateX(-50%);
+  flex-direction: column-reverse;
+}
+.port--bottom {
+  left: 50%;
+  bottom: auto;
+  top: 100%;
+  padding-top: 2px;
+  transform: translateX(-50%);
+  flex-direction: column;
+}
+/* Above the resize controls, so even where they do reach, the button is what receives the press. */
+.port--top, .port--bottom { z-index: 12; }
 
 .port-dot {
   /*
@@ -1767,6 +1905,18 @@ button.port-dot {
    the two edges meet and read as one control with a line through it. */
 .rail-section--foot { border-bottom: none; padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
 
+/*
+ * A folded history with refusals behind it says so in words, and the arrow itself is left alone.
+ *
+ * It was drawn rose to match the pill it stands in for, and the owner's answer was immediate: "i
+ * dotn want the button to be red for history refused". The label under it carries the count instead,
+ * which is the better half of the pair anyway. Canon 15 requires that a refusal is never hidden, and
+ * "History, 2 refused" satisfies that in a way a coloured border never did: a colour has to be
+ * learned before it means anything, and a count does not.
+ *
+ * So there is no rule here. The arrow is the arrow whatever is behind it.
+ */
+
 /* --- the two web arrows --- */
 
 /*
@@ -1776,27 +1926,82 @@ button.port-dot {
  * a block of cards above or below. Four identical dots said the same thing four times, and an
  * arrow says which way its web opens before anyone clicks it.
  */
+/*
+ * Sized and shaded to be pressed, after the owner said these were "too hard to hit and blended too
+ * closely into the cards instead of being pushable button".
+ *
+ * Both halves of that are separate faults. It was 15px square carrying an 8px glyph, which is under
+ * half the width a pointer target is normally given and smaller than the card's own text. And it was
+ * a flat outline in the card's own raised colour, so it read as part of the card rather than as
+ * something sitting on it.
+ *
+ * So: 22px with a glyph big enough to see, a lighter face than the card with a highlight along the
+ * top edge and a shadow under it, and a real pressed state. The face, the shadow and the travel on
+ * :active are what say "button"; a hover colour alone never did, because you have to already be on
+ * it to find out.
+ */
 .port-arrow {
-  width: 15px;
-  height: 15px;
-  flex: 0 0 15px;
+  position: relative;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  font-size: 8px;
+  font-size: 11px;
   line-height: 1;
-  border-radius: 3px;
-  background: var(--bg-raised);
-  border: 1.5px solid var(--line-strong);
-  color: var(--text-dim);
+  border-radius: 5px;
+  background: linear-gradient(180deg, #2b3550 0%, #1c2437 100%);
+  border: 1px solid var(--line-strong);
+  color: var(--text);
   cursor: pointer;
-  transition: border-color 120ms, color 120ms, box-shadow 120ms;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 2px 4px rgba(0, 0, 0, 0.55);
+  transition: border-color 120ms, color 120ms, box-shadow 120ms, transform 60ms, background 120ms;
 }
-.port-arrow--up:hover { border-color: var(--ok); color: var(--ok); box-shadow: 0 0 8px rgba(45, 212, 191, 0.45); }
-.port-arrow--down:hover { border-color: #7cc4ff; color: #7cc4ff; box-shadow: 0 0 8px rgba(124, 196, 255, 0.45); }
+
+/*
+ * Grab room past the edge of the face, which costs no layout.
+ *
+ * The button cannot simply be made bigger: these straddle the card's top and bottom edges and the
+ * server places a card's webs clear of them, so growing the face pushes into the card's own header.
+ * An overlay extends where the press lands without moving anything, which is the half of "too hard
+ * to hit" that has nothing to do with how it looks.
+ */
+.port-arrow::after {
+  content: '';
+  position: absolute;
+  inset: -9px;
+  border-radius: 10px;
+}
+/*
+ * The grab room never reaches back toward the card, only away from it and to the sides. Extending it
+ * inward would put the enlarged target back over the resize line, which is the fault this pair of
+ * rules exists to keep fixed.
+ */
+.port--top .port-arrow::after { inset: -9px -9px 0 -9px; }
+.port--bottom .port-arrow::after { inset: 0 -9px -9px -9px; }
+
+.port-arrow:hover {
+  background: linear-gradient(180deg, #36446a 0%, #232d44 100%);
+}
+.port-arrow--up:hover { border-color: var(--ok); color: var(--ok); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(45, 212, 191, 0.5), 0 2px 4px rgba(0, 0, 0, 0.55); }
+.port-arrow--down:hover { border-color: #7cc4ff; color: #7cc4ff; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 10px rgba(124, 196, 255, 0.5), 0 2px 4px rgba(0, 0, 0, 0.55); }
+
+/* Pressed: it goes down and the shadow under it goes away, so the click is felt as well as seen. */
+.port-arrow:active {
+  transform: translateY(1px);
+  background: linear-gradient(180deg, #1c2437 0%, #222c42 100%);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
 /* Open reads as lit rather than as a different shape, so the arrow still points the way back. */
 .port-arrow.is-open { border-color: #7cc4ff; color: #7cc4ff; }
+
+/* The keyboard has to be able to find these too, and an outline is the only thing that says so. */
+.port-arrow:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 2px; }
 
 /* A saved layout and the button that forgets it, so a name and its bin never wrap onto two lines. */
 .layout-row { display: flex; gap: 4px; align-items: stretch; }
@@ -2405,6 +2610,107 @@ button.port-dot {
 .topbar-btn:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }
 .topbar-btn:disabled { opacity: 0.4; cursor: default; }
 
+/*
+ * The rail's fold button, in the rail's own top-right corner.
+ *
+ * It was in the top bar first, left of the mark, and the owner's correction is a general rule
+ * rather than a preference: "it shoudl be connected to the bar it collapses". A control in one
+ * region acting on another has to be learned; one pinned to the thing it moves does not, which is
+ * why every window in the world puts minimise on the window.
+ *
+ * Sticky with its own height taken back by a negative margin, rather than absolute. The rail is
+ * itself the scrolling box, and an absolutely positioned child of a scrolling box scrolls away with
+ * the content, so the control would leave the corner the moment the rail was long enough to scroll,
+ * which is exactly when a long rail makes somebody want to fold it. Sticky holds it against the top
+ * of the scrollport instead, and the negative bottom margin means the sections below start where
+ * they always did rather than being pushed down by a control that is only 22 pixels of chevron.
+ *
+ * Square rather than a pill: it is a chevron, and a pill around a single character reads as a tag.
+ */
+.rail-fold {
+  position: sticky;
+  top: 6px;
+  align-self: flex-end;
+  flex: none;
+  margin: 6px 6px -22px 0;
+  z-index: 3;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms, background 120ms;
+}
+.rail-fold:hover { color: var(--text); border-color: var(--line-strong); background: #2b3550; }
+.rail-fold:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 2px; }
+
+/*
+ * The way back, drawn only while the rail is at zero.
+ *
+ * A tab against the window edge rather than a button in the bar, because at this moment there is no
+ * bar: the fold control went with the thing it folded, which is the one flaw in attaching a control
+ * to what it hides. Half-rounded on the outer edge so it reads as something tucked against the side
+ * of the window with more behind it.
+ *
+ * Fixed, not absolute, so it does not depend on which ancestor happens to be positioned. It is a
+ * single small element with nothing to lay out around it.
+ *
+ * Deliberately louder than the fold button it undoes, and that is not a symmetry mistake. The fold
+ * button can afford to be quiet because the bar around it is right there; this one is alone against
+ * an empty canvas.
+ *
+ * It took two passes to get loud enough, and the first one is why the numbers below look excessive.
+ * A blind reader shown the folded window called it "dim grey on black, only a few pixels wide" and
+ * said it would not register at a glance, which is the exact failure this exists to prevent. Made
+ * wider and given a shadow, it was shown to a second reader who said the same thing in the same
+ * words. The fault was the fill: `--bg-raised` is #111524 against a #0b0e16 canvas, so the tab was
+ * the right size and effectively the same colour as the hole it sat in. An accent outline over that
+ * dark fill got a third reader as far as finding it and naming what it did, and no further: still
+ * "borders on being invisible". So it is filled with the accent rather than outlined in it.
+ *
+ * Loud on purpose, and it is worth saying why that is acceptable here when it would not be
+ * elsewhere. This is the only control on screen for a state the user chose to enter, it exists for
+ * exactly as long as that state lasts, and the alternative failure is a rail that folds away
+ * forever. It is not permanent chrome: open the rail and it is gone.
+ *
+ * The fourth reader found it at a glance and then named the cost: the loudest thing on screen, for
+ * a minor control. So the colour stays, since the colour is what fixed it, and the mass comes down.
+ * Shorter, and the glow around it is gone. Being findable was never a function of how big it is.
+ */
+.rail-unfold {
+  position: fixed;
+  left: 0;
+  top: 96px;
+  z-index: 40;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  width: 24px;
+  height: 54px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 0 9px 9px 0;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.rail-unfold:hover { background: #9a80ff; }
+.rail-unfold:focus-visible { outline: 2px solid #7cc4ff; outline-offset: 2px; }
+
 /* --- what the Ceiling panel says when the server refuses one of its numbers --- */
 
 /*
@@ -2523,7 +2829,14 @@ button.port-dot {
  * to the fixed 260px the day pills beside it use, because one kind or three is not the same width.
  */
 .colhead-seg { display: inline-flex; align-items: center; gap: 5px; }
-.colhead--refusal { width: auto; min-width: 140px; max-width: 380px; justify-content: flex-start; gap: 10px; }
+/*
+ * The same 260px as a day pill, on the owner's instruction: "and also equally spaced to reports".
+ *
+ * It was `width: auto` with a floor and a ceiling, sitting in a slot the row lays out at a fixed
+ * 260px, so the gap either side of it was whatever was left over. The stride was even and the pills
+ * were not, which reads as the one odd item in a row rather than as a row.
+ */
+.colhead--refusal { width: 260px; box-sizing: border-box; justify-content: flex-start; gap: 10px; }
 
 /* --- the task pill on a card's face --- */
 
@@ -2605,4 +2918,77 @@ button.port-dot {
   border-radius: 999px;
   padding: 0 6px;
   cursor: default;
+}
+
+/* --- a card the owner has coloured --------------------------------------------------------- */
+
+/*
+ * The colour is the card, not a stripe on top of it.
+ *
+ * The owner's words: "make 'card colour' change entire card theme color, not just thet op border".
+ * It used to reach exactly one edge, the header's `border-top`, which on a board seen from across
+ * a wide screen is a three pixel line and nothing else. Now the same value paints the whole card.
+ *
+ * Everything below reads `--role-color`, which is already set once on the card element, so there is
+ * no second or third place a colour has to be plumbed to and nothing here has to know the list of
+ * colours the menu offers.
+ *
+ * `:where()` is the load-bearing part. It holds these at the specificity of a bare `.node`, so
+ * every state rule already in this file (`is-selected`, `is-focused`, `is-dead`, `is-off`) still
+ * wins over them without any of those four being touched. A card that is selected still shows the
+ * selection edge; a card that is off still reads as off. Colour is what a card IS, and those are
+ * what it is DOING, and the doing has to be able to speak over the being.
+ *
+ * `color-mix` rather than seven hand-picked palettes. The chosen hue is mixed into the surface it
+ * sits on, so one rule covers every colour the menu has now and every one it ever gains, and the
+ * result stays as dark as the surface underneath it: the mix is against `--bg-raised` and
+ * `--bg-node`, never against white, which is what would turn a title into grey-on-colour.
+ */
+.node:where(.is-tinted) {
+  border-color: var(--role-color);
+  /*
+   * Seven percent. Enough to tell two cards apart at a glance from the far side of the board, and
+   * far too little to fight the terminal inside, which draws its own opaque background over this
+   * anyway. What the CLI printed is the CLI's, and nothing here tints a single pixel of it.
+   */
+  background: color-mix(in srgb, var(--role-color) 7%, var(--bg-node));
+}
+
+/*
+ * The header carries more of it, because the header is chrome Garden owns outright: the title, the
+ * status word and the chips are all ours to colour, where the pane below is the program's.
+ *
+ * Eighteen percent against `--bg-raised` lands around #24224b for the default violet, which is a
+ * dark surface. `--text` on it is the same contrast the untinted header has, so the title is read
+ * rather than decoded.
+ */
+.node:where(.is-tinted) .node-head {
+  background: color-mix(in srgb, var(--role-color) 18%, var(--bg-raised));
+  border-bottom-color: color-mix(in srgb, var(--role-color) 30%, var(--line));
+}
+
+/*
+ * The meta strip sits between the two, so it takes a value between the two. Without this the row
+ * of chips reads as a seam where the header tint stops rather than as part of the card.
+ */
+.node:where(.is-tinted) .node-meta {
+  background: color-mix(in srgb, var(--role-color) 11%, var(--bg-node));
+}
+
+/*
+ * A card that is off keeps its colour, quietly.
+ *
+ * `.node.is-off` sets its own `background` and its own border, and it has to keep winning: a
+ * stopped card must not look like a running one. But it should still be recognisably the card the
+ * owner coloured, so the tint is reapplied here at a third of the strength, under a selector that
+ * is specific enough to sit on top of `.is-off` rather than beside it.
+ */
+.node.is-tinted.is-off {
+  background: color-mix(in srgb, var(--role-color) 3%, var(--bg-node));
+}
+.node.is-tinted.is-off .node-head {
+  background: color-mix(in srgb, var(--role-color) 7%, var(--bg));
+}
+.node.is-tinted.is-off .node-meta {
+  background: color-mix(in srgb, var(--role-color) 4%, var(--bg-node));
 }

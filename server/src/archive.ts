@@ -50,9 +50,9 @@ const DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 
 /**
  * Claude Code names a project folder after its path with every non-alphanumeric character replaced
- * by a dash, so `C:\Work\App\1.0` is stored under `C--Work-App-1-0`. That mapping loses information
- * (a dash in the slug may have been a separator or a character in the name), which is why the check
- * below is equality against a known slug and never a prefix: `C--Work-App-1-0` and
+ * by a dash, so `C:\Work\App\1.0` is stored under `C--Work-App-1-0`. That mapping loses
+ * information (a dash in the slug may have been a separator or a character in the name), which is
+ * why the check below is equality against a known slug and never a prefix: `C--Work-App-1-0` and
  * `C--Work-App-1-0-stable` are different directories that a prefix test cannot tell apart.
  */
 function slugFor(path: string): string {
@@ -65,12 +65,9 @@ function slugFor(path: string): string {
  *
  * An allow list rather than a deny list, so the default for an unrecognised folder is to leave it
  * alone. Garden had no filter at all before this, and the result was that it copied 3.7 GB of the
- * owner's unrelated work into its own database, including gigabytes from a project he had told it
- * to stay out of entirely. A deny list would have required knowing the name of every folder to
- * avoid, in advance, before anything went wrong. This does not.
- *
- * ~/.claude/projects holds every Claude Code session on the machine, not only the ones this board
- * launched, which is the whole reason the default has to be "leave it alone".
+ * owner's unrelated work into its own database, including 1.3 GB from a project he had told it to
+ * stay out of entirely. A deny list would have needed me to know the name of every folder to avoid,
+ * in advance, before anything went wrong. This does not.
  *
  * The consequence worth stating: adding a project to the board is what puts it in scope. Nothing
  * else does.

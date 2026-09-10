@@ -8,7 +8,7 @@
  *
  * NOTHING RECORDED THE DEATH. The server's stdout goes to whatever terminal launched it and is gone
  * when that window closes; the newest server log on the machine was five days stale. So the cause
- * had to be inferred from free memory and an application queue log rather than read. A supervisor that
+ * had to be inferred from free memory and a Unity queue log rather than read. A supervisor that
  * restarts the server without writing down why it died would fix the symptom and destroy the only
  * chance of fixing the cause, so the log comes first here and the restart second.
  *

@@ -32,7 +32,7 @@ export interface ToolEntry {
   title: string
   /** What kind of thing this is, shown as the dot's colour and read by the title attribute. */
   kind: 'tool'
-  /** Free text: what it is wired to, e.g. "docs mcp". */
+  /** Free text: what it is wired to, e.g. "blender mcp". */
   detail?: string
 }
 

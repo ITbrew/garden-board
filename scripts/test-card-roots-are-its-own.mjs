@@ -18,7 +18,7 @@
  * What is NOT checked here is that the CLI honours the settings, because that is the CLI's
  * behaviour rather than Garden's and it costs a real session to ask. It was verified by hand against
  * claude 2.1.232: asked to list its loaded instruction files, a plain run named
- * the user-level `~/.claude/CLAUDE.md` and the project's own `CLAUDE.md`; the same run with these settings
+ * the machine-wide `CLAUDE.md` and this repository's own; the same run with these settings
  * answered "NONE". The note is here rather than in a commit message so the next person knows which
  * half has a test and which half has a measurement.
  */

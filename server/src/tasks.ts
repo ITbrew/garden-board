@@ -921,9 +921,16 @@ export function reassignEvidence(
           allowed: false,
           rule: 'reason-untrue',
           reason:
+            /*
+             * This used to end "Change that figure on the board if it is wrong for this work". The
+             * control it referred to was taken off the Ceiling panel on 2026-09-09, at the owner's
+             * request and in his words: "remove 'silence before silent' field, idk what that is". A
+             * sentence telling a card to go and change something that no longer has anywhere to be
+             * changed from is worse than no sentence, so it says the figure and stops there.
+             */
             `${owner.title} was last active ${mins} minute${mins === 1 ? '' : 's'} ago, and this board ` +
-            `treats silence as ${look.silenceMinutes} minutes. Change that figure on the board if it is ` +
-            'wrong for this work, rather than working around it here.',
+            `treats silence as ${look.silenceMinutes} minutes, so it has not been quiet long enough ` +
+            'for owner_silent to be true yet.',
         }
       }
       return { allowed: true }

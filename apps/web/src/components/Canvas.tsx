@@ -39,6 +39,8 @@ import { NewCardForm, type NewCardRequest } from './NewCardForm'
 import { NewDocForm, type NewDocRequest } from './NewDocForm'
 import { COLLAPSED_H, packCards, shouldAutoPack } from '../layout'
 import { BOARD, FRAME_HEADROOM, drawnOnBoard } from '@garden/shared'
+import { FirstRun } from './FirstRun'
+import { markFirstRun } from '../firstrun'
 
 
 /**
@@ -280,11 +282,22 @@ function CanvasInner() {
     [visDocs, sessionsWithColumns],
   )
 
-  // And the same for history, so its dot can fold as well as unfold. The two blocks work the same
-  // way and the owner expects the two controls to match; only the roots one ever toggled.
+  /**
+   * And the same for history, so its arrow can fold as well as unfold.
+   *
+   * Both states count, exactly as they do for roots above: turn cards on the board, or a row of day
+   * pills with no day opened yet. Counting only the cards was why history could not be folded away.
+   * The first press asks for the days and draws pills rather than cards, so this set stayed empty,
+   * the arrow went on reading "History", and the second press asked for the days again instead of
+   * folding. From the owner's side the control simply did not close anything.
+   */
   const historyOwners = useMemo(
-    () => new Set(visDocs.filter((d) => d.web === 'history' && d.ownerId).map((d) => d.ownerId!)),
-    [visDocs],
+    () =>
+      new Set([
+        ...visDocs.filter((d) => d.web === 'history' && d.ownerId).map((d) => d.ownerId!),
+        ...historyByCard.keys(),
+      ]),
+    [visDocs, historyByCard],
   )
 
   const auto = shouldAutoPack(all.map((c) => c.item))
@@ -349,6 +362,16 @@ function CanvasInner() {
               height: dim.height,
               contextOpen: contextOwners.has(c.item.id),
               historyOpen: historyOwners.has(c.item.id),
+              /*
+               * How many refusals are sitting behind a folded history, so the arrow can say they
+               * are there.
+               *
+               * This is not decoration. The refusal pill now folds away with the history, on the
+               * owner's request, and canon 15 forbids a refusal that nobody can see. Folding may
+               * hide the detail; it may never hide the fact. So the count travels to the card and
+               * the arrow is marked while the block is shut.
+               */
+              refusalCount: refusalsByCard.get(c.item.id)?.length ?? 0,
             } satisfies SessionNodeData,
           }
         }
@@ -841,16 +864,25 @@ function CanvasInner() {
      * same place whether the card has one day behind it or nine, since a pill that moves depending
      * on how much history a card happens to have is a pill the eye has to hunt for.
      *
-     * Drawn for a card with refusals whether or not its history has ever been unfolded: the two are
-     * separate questions and a card whose arrow has never been pressed can still have been refused.
+     * Drawn only while that card's history is unfolded, since 2026-09-09: "make 'refused' a part of
+     * collapsible history section". It used to be drawn whenever refusals existed, which meant the
+     * one thing in this row that could not be folded away was the one the owner most often wanted
+     * out of the way once he had read it.
+     *
+     * What makes that safe is the mark on the card's own history arrow, which is drawn from
+     * `refusalCount` above. Without it this change would hide a refusal behind a control nobody had
+     * pressed, and canon 15 forbids exactly that. The two halves are one change and neither is
+     * correct on its own.
      */
-    const withRow = new Set([...historyByCard.keys(), ...refusalsByCard.keys()])
+    const withRow = new Set(historyByCard.keys())
     for (const sessionId of withRow) {
       const card = visSessions.find((c) => c.id === sessionId)
       if (!card) continue
       const hist = historyByCard.get(sessionId)
       const refused = refusalsByCard.get(sessionId)
       const groups = hist?.groups ?? []
+      // A card whose history is open but holds neither days nor refusals has an empty row, which is
+      // nothing rather than a row of nothing.
       if (groups.length === 0 && !refused) continue
       const openDays = new Set(hist?.open ?? [])
 
@@ -859,7 +891,46 @@ function CanvasInner() {
       const slots = groups.length + (refused ? 1 : 0)
       const rowWidth = slots * (260 + BOARD.GAP) - BOARD.GAP
       const rowX = card.x + (card.width ?? 420) / 2 - rowWidth / 2
-      const y = card.y - 56 - 34
+      /*
+       * Where the row sits when nothing is open: 56 above the card, mirroring the roots row's 56
+       * below it, less the 34 a pill takes so the two rows are the same distance from their card.
+       */
+      const restingY = card.y - 56 - 34
+      /*
+       * An opened day is drawn in the same band this row sits in, so the row moves above it.
+       *
+       * The owner: "when a history day is opened, make that panel not overlap the other dates". The
+       * block is placed by the server directly above the card and grows upward in rows of six, and
+       * this row is at a fixed 90 above the card, so the first opened day landed on the pills for
+       * every day that was not open. Two things drawn above one card, neither knowing about the
+       * other.
+       *
+       * Read from the board rather than recomputed from the server's placement arithmetic. The
+       * block's cards are on the board already, as documents with `web === 'history'` under this
+       * card, and the `frames` memo above draws the boundary the eye actually reads at
+       * `min(their y) - FRAME_HEADROOM`. Taking the same expression means the row clears the frame
+       * that is drawn rather than the frame that was intended, and it keeps following when the two
+       * disagree. A second copy of `originY - (rows - 1) * ROW_PITCH` would be a number to keep in
+       * step with a file in another package.
+       *
+       * Both awkward cases fall out of it rather than needing to be handled. Several days open at
+       * once share one frame, because the frame is grouped per card and per web and not per day, so
+       * the minimum is over all of them and the row clears the topmost. And a day that wraps from
+       * one row of six to two moves those cards' `y`, so the minimum moves with it on the very next
+       * render.
+       *
+       * `Math.min` rather than an assignment: a frame that somehow sat below the resting row would
+       * otherwise pull the row DOWN into the card. Nothing may push this row lower than where it
+       * sits with nothing open.
+       */
+      const HEADER_LIFT = 34
+      let y = restingY
+      const block = visDocs.filter((d) => d.web === 'history' && d.ownerId === sessionId)
+      if (block.length > 0) {
+        const frameTop = Math.min(...block.map((d) => d.y)) - FRAME_HEADROOM
+        // The pill's own 34, and then the clear space the board keeps between any two things on it.
+        y = Math.min(restingY, frameTop - HEADER_LIFT - BOARD.GAP)
+      }
       const slotX = (slot: number) => rowX + slot * (260 + BOARD.GAP)
 
       if (refused) {
@@ -1298,6 +1369,10 @@ function CanvasInner() {
   const paneMenu = useCallback(
     (e: MouseEvent | React.MouseEvent) => {
       e.preventDefault()
+      // The getting-started step ticks when a menu opens, not when something in it is chosen. What
+      // the step claims is that this person has seen a right-click menu, and opening one is exactly
+      // what establishes that. Board and card share the step; the panel's text names both. Canon 23.
+      markFirstRun('rightClick')
       const pid = activeProjectId
       setMenu({
         x: e.clientX,
@@ -1422,6 +1497,9 @@ function CanvasInner() {
   const nodeMenu = useCallback(
     (e: React.MouseEvent, node: Node) => {
       e.preventDefault()
+      // The card's own menu, which is a different menu from the board's. One step covers both, and
+      // its text says they are different, because five steps was the brief and this is one lesson.
+      markFirstRun('rightClick')
       // The panel's only action is to fold away. Falling through to the card menu below would
       // offer Close, which would try to close a session by the panel's id.
       if (node.id.startsWith(PIPE_ID)) {
@@ -1691,12 +1769,19 @@ export function Canvas() {
         <CanvasInner />
       </ReactFlowProvider>
 
+      {/*
+        The panel that used to sit here said "Nothing on the board yet. Pick a project, then start a
+        terminal or open a document." It was accurate and it vanished the instant a card existed,
+        which is the moment every other question a newcomer has starts. Its text survives inside the
+        first two steps of the panel below, which stays until the six are done.
+      */}
       {empty && (
         <div className="canvas-empty">
           <h2>Nothing on the board yet</h2>
           <p>Pick a project, then start a terminal or open a document. Both become cards here.</p>
         </div>
       )}
+      <FirstRun />
     </div>
   )
 }

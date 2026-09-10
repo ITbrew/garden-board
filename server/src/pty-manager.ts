@@ -157,8 +157,37 @@ export class PtyManager extends EventEmitter {
   private live = new Map<string, Live>()
   private flushTimer: NodeJS.Timeout | null = null
 
-  spawn(sessionId: string, spec: LaunchSpec, cwd: string, cols = SPAWN_COLS, rows = SPAWN_ROWS): number {
+  /**
+   * Start a process for this card, on the grid the card was last drawn at.
+   *
+   * The spawn pair is the fallback and not the default, and the difference is the whole of the
+   * owner's "resetting the server messes up the cards conversation views, i have to open terminal
+   * for the card to be able to read".
+   *
+   * A card that has ever had a pane open is not a 120-column card. The pane fits the terminal to
+   * itself and resizes the process, `resize` records that pair beside the log, and everything the
+   * card has printed since is drawn for that width. When the backend restarts, `revive` starts the
+   * card again, and starting it here at 120x30 changed the width underneath a history that had been
+   * written at 161: the geometry file was reset to the spawn pair while the log beside it still held
+   * bytes drawn at the old one, and the card's own miniature, which follows the size the server
+   * reports, re-wrapped a 150-column line into 120 and 30. Measured at exactly those numbers by
+   * `scripts/test-restart-keeps-a-card-readable.mjs`, which fails on the spawn pair and passes on
+   * this. The dock pane was correct throughout, because opening one resizes the process to fit it,
+   * which is why his way out was to open a terminal.
+   *
+   * The recorded pair is a better answer than 120x30 rather than a certain one: the dock may have
+   * been laid out differently since. It does not need to be certain. A pane corrects it on open the
+   * way it always has, and until then the card is replaying its own bytes at the width they were
+   * written for instead of at a width nothing ever drew at.
+   *
+   * An explicit pair still wins, for a caller that knows the grid it wants.
+   */
+  spawn(sessionId: string, spec: LaunchSpec, cwd: string, cols?: number, rows?: number): number {
     if (this.live.has(sessionId)) throw new Error(`session already live: ${sessionId}`)
+
+    const known = cols === undefined && rows === undefined ? readGeometry(sessionId) : null
+    cols = cols ?? known?.cols ?? SPAWN_COLS
+    rows = rows ?? known?.rows ?? SPAWN_ROWS
 
     const proc = pty.spawn(spec.file, spec.args, {
       name: 'xterm-256color',
@@ -207,10 +236,11 @@ export class PtyManager extends EventEmitter {
     /*
      * Stamped at spawn as well as on every resize, because the file outlives the run that wrote it.
      *
-     * A card that ran at 163 columns yesterday, was stopped, and is started again today begins
-     * drawing at the spawn size into a fresh log. Without this the old pair would still be sitting
-     * beside it claiming 163, and the new bytes would be replayed against a width nothing had drawn
-     * at since the last session. The record has to be reset by the thing that resets the bytes.
+     * A new run starts a fresh log, so whatever pair sits beside it has to be the pair THIS process
+     * is drawing for, and nothing else may be assumed. It usually now matches what was already
+     * there, since the grid above is read from that same file, and it still has to be written: the
+     * fallback path spawns at 120x30 for a card with no record, and an explicit pair from a caller
+     * agrees with nothing on disk at all. The record is reset by the thing that resets the bytes.
      */
     writeGeometry(sessionId, cols, rows)
     this.startFlushTimer()

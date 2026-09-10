@@ -435,6 +435,129 @@ const CLAIM_TIMEOUT_MS = 400
  * would make the CLI unusable to fix Garden. An occasional collision is the cheaper failure, and
  * the territory check above still stands on its own with no server at all.
  */
+/**
+ * The tools that dispatch a subagent, under both of the names this project has seen them called.
+ *
+ * `server/src/hooks-install.ts` already had to learn this the hard way and says so: "Task is what
+ * the matcher syntax calls the dispatch tool, but the permission entry is Agent". Which of the two
+ * arrives in `tool_name` depends on the build, so both are matched. Matching one and guessing wrong
+ * is the failure that matters here, because it would leave the board saying a card has a spawn
+ * limit while the card spawns freely, and a limit that does not refuse is worse than no limit: the
+ * panel would be asserting something Garden cannot back up.
+ *
+ * A name that is not on this list is not treated as a dispatch, so every other tool call goes
+ * through untouched and unasked.
+ */
+const DISPATCH_TOOLS = new Set(['Task', 'Agent'])
+
+function isDispatch(event) {
+  const tool = typeof event.tool_name === 'string' ? event.tool_name : null
+  return Boolean(tool && DISPATCH_TOOLS.has(tool))
+}
+
+/**
+ * Ask the server whether this card has spawned its allowance, and refuse the dispatch if it has.
+ *
+ * The same shape as `askForClaim` below and for the same reasons, down to the timeout: the server
+ * answers or it does not, and not answering means the dispatch goes ahead. Canon 15 forbids a
+ * silent refusal, and it equally forbids Garden becoming a thing that stops work when its own
+ * backend is down. A limit that fails closed on a restart would look exactly like the CLI breaking.
+ *
+ * This is the one place Garden refuses a subagent, and it can only be here. Garden hears about a
+ * subagent through `SubagentStart`, which the CLI fires after its own dispatch, so a check anywhere
+ * downstream would be refusing to record something that is already running. `PreToolUse` is before.
+ */
+function askForDispatch(gardenSessionId, next) {
+  let settled = false
+  const finish = (reason) => {
+    if (settled) return
+    settled = true
+    next(reason)
+  }
+
+  let body
+  try {
+    body = JSON.stringify({ gardenSessionId })
+  } catch {
+    return finish(null)
+  }
+
+  const token = process.env.GARDEN_SESSION_TOKEN
+  const req = request(
+    {
+      host: '127.0.0.1',
+      port: PORT,
+      path: '/dispatch',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+    },
+    (res) => {
+      let text = ''
+      res.setEncoding('utf8')
+      res.on('data', (d) => {
+        text += d
+        if (text.length > 64 * 1024) {
+          req.destroy()
+          finish(null)
+        }
+      })
+      res.on('error', () => finish(null))
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(text)
+          if (parsed && typeof parsed.deny === 'string' && parsed.deny) return finish(parsed.deny)
+        } catch {
+          // An unparseable body is an unexpected answer, and unexpected means allow.
+        }
+        finish(null)
+      })
+    },
+  )
+  req.setTimeout(CLAIM_TIMEOUT_MS, () => {
+    req.destroy()
+    /*
+     * Said out loud on stderr, for the same reason the claim timeout is: the dispatch is about to
+     * happen without having been counted, and a subagent spawned during a restart should not be
+     * indistinguishable from one Garden allowed.
+     */
+    try {
+      process.stderr.write(
+        `[garden] Garden did not answer in ${CLAIM_TIMEOUT_MS}ms, so this dispatch went ahead without ` +
+          'being checked against this card\'s subagent allowance. The server is restarting or down.\n',
+      )
+    } catch {
+      // A closed pipe must never stop the dispatch either.
+    }
+    finish(null)
+  })
+  req.on('error', (err) => {
+    /*
+     * The same correction this file already made for the claim door, applied here rather than
+     * learned again: nothing listening answers instantly with ECONNREFUSED, so the 400 ms timeout
+     * never fires and this is the path a dispatch during a restart actually takes. Guarded on
+     * `settled` because a destroyed request arrives here a moment later and one event earns one
+     * line.
+     */
+    if (!settled) {
+      try {
+        process.stderr.write(
+          `[garden] Garden did not answer (${err?.code ?? 'connection failed'}), so this dispatch went ` +
+            "ahead without being checked against this card's subagent allowance. The server is down or " +
+            'not listening on this port.\n',
+        )
+      } catch {
+        // A closed pipe must never stop the dispatch either.
+      }
+    }
+    finish(null)
+  })
+  req.end(body)
+}
+
 function askForClaim(gardenSessionId, target, next) {
   let settled = false
   const finish = (reason) => {
@@ -868,6 +991,21 @@ process.stdin.on('end', () => {
     if (verifierNo) {
       denyWrite(verifierNo)
       return postEvent(event)
+    }
+    /*
+     * A dispatch is asked about before the write checks below, because it is not a write and would
+     * otherwise fall past both of them with `target` null.
+     *
+     * Same condition as the claim: only a real card asks, because `GARDEN_SESSION_ID` is what names
+     * the card whose allowance is being counted, and a descendant session that merely inherited the
+     * environment must not spend a card's allowance under its name any more than it may take a
+     * file flag in it.
+     */
+    if (isDispatch(event) && process.env.GARDEN_SESSION_ID) {
+      return askForDispatch(process.env.GARDEN_SESSION_ID, (reason) => {
+        if (reason) denyWrite(reason)
+        postEvent(event)
+      })
     }
     const refusal = writeOutsideTerritory(event, target)
     if (refusal) {

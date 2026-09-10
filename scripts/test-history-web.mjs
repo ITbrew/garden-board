@@ -111,7 +111,20 @@ ws.send(JSON.stringify({ t: 'history.open', sessionId: card.id, group: day.group
 await sleep(1200)
 const web = st.docs.filter((d) => d.ownerId === card.id && d.web === 'history')
 check('the history web unfolds one card per turn', web.length === 1, `${web.length} cards`)
-check('the card is named after what was asked', web[0]?.title.includes('rename'), String(web[0]?.title))
+/*
+ * Named after the work, not after the ask, since canon 17 revision 4.
+ *
+ * This asserted `title.includes('rename')`, the first word of the sentence the turn was handed, and
+ * it was the rule at the time. It stopped being the rule for the reason the owner gave: twenty cards
+ * on his board all wearing the sentence a wire wake-up sends, each of them describing the postman
+ * rather than anything done. The turn here is asked to "rename the loader module" and writes
+ * `loader.ts`, so the file is the honest name and the ask is quoted inside the page.
+ *
+ * Both halves are checked. Asserting only that the file is named would pass on a title that
+ * mentioned both, which is the shape this deliberately does not have.
+ */
+check('the card is named after the work it did', /loader\.ts/.test(web[0]?.title ?? ''), String(web[0]?.title))
+check('and not after the sentence it was handed', !/rename/i.test(web[0]?.title ?? ''), String(web[0]?.title))
 /*
  * The group is the DAY now. Origin is shown in the card's name.
  *

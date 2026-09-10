@@ -11,6 +11,7 @@ import {
   FRAME_HEADROOM,
   WS_PATH,
   drawnOnBoard,
+  subagentsAllowedFor,
   type AgentEvent,
   type ClientMessage,
   type ServerMessage,
@@ -3606,6 +3607,12 @@ function startSession(s: TerminalSession): TerminalSession {
       canSpawnAgents: s.canSpawnAgents,
       canUseTeams: s.canUseTeams,
       teamSize: s.teamSize,
+      // The board's figure, for a card that set no team size of its own. Read here, at launch,
+      // because this is the moment the file is written and the CLI is about to read it.
+      subagents: store.getLimits(s.projectId).subagents,
+      // The card's own answer against the board's, resolved by the same function the hook asks on
+      // every dispatch, so what this card is launched with and what it is refused with agree.
+      subagentsAllowed: subagentsAllowedFor(s, store.getLimits(s.projectId).subagentsAllowed),
       model: s.modelChoice,
       effort: s.effortChoice,
       roleClass: s.roleClass,
@@ -3826,6 +3833,9 @@ function createSession(
         roleClass: msg.roleClass && ROLE_POWERS[msg.roleClass] ? msg.roleClass : null,
         canSpawnAgents: msg.roleClass ? (ROLE_POWERS[msg.roleClass]?.hires ?? true) : true,
         canUseTeams: true,
+        // Null rather than a boolean: a brand new card has not answered this, so the board's own
+        // ceiling decides for it until the owner says otherwise on the card itself.
+        subagentsAllowed: null,
         effort: null,
         modelChoice: typeof msg.modelChoice === 'string' ? msg.modelChoice : null,
         effortChoice: typeof msg.effortChoice === 'string' ? msg.effortChoice : null,
@@ -4531,6 +4541,17 @@ function handle(ws: WebSocket, msg: ClientMessage) {
             : s.roleClass,
         canSpawnAgents: typeof msg.canSpawnAgents === 'boolean' ? msg.canSpawnAgents : s.canSpawnAgents,
         canUseTeams: typeof msg.canUseTeams === 'boolean' ? msg.canUseTeams : s.canUseTeams,
+        /*
+         * Three states arriving over a wire that has two words for absent. `null` is a value here,
+         * meaning this card withdraws its answer and follows the board, so only `undefined` may be
+         * read as "the sender said nothing about this".
+         */
+        subagentsAllowed:
+          msg.subagentsAllowed === undefined
+            ? s.subagentsAllowed
+            : msg.subagentsAllowed === null || typeof msg.subagentsAllowed === 'boolean'
+              ? msg.subagentsAllowed
+              : s.subagentsAllowed,
         teamSize:
           msg.teamSize === null
             ? null
@@ -4591,6 +4612,8 @@ function handle(ws: WebSocket, msg: ClientMessage) {
         canSpawnAgents: updated.canSpawnAgents,
         canUseTeams: updated.canUseTeams,
         teamSize: updated.teamSize,
+        subagents: store.getLimits(updated.projectId).subagents,
+        subagentsAllowed: subagentsAllowedFor(updated, store.getLimits(updated.projectId).subagentsAllowed),
         model: updated.modelChoice,
         effort: updated.effortChoice,
         roleClass: updated.roleClass,
@@ -6292,6 +6315,18 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       if (l.silenceMinutes !== undefined && !whole(l.silenceMinutes)) {
         return fail(ws, 'a limit has to be a whole number between 1 and 200', msg.t)
       }
+      if (l.subagents !== undefined && !whole(l.subagents)) {
+        return fail(ws, 'a limit has to be a whole number between 1 and 200', msg.t)
+      }
+      /*
+       * The one field on this panel that is not a number, so `whole` is the wrong check and a
+       * number arriving here is a client that has not caught up rather than a value to coerce.
+       * Refusing it is safer than reading 0 as no: this setting can stop a dispatch on a card that
+       * is running now, and it must only ever change because somebody said so in those words.
+       */
+      if (l.subagentsAllowed !== undefined && typeof l.subagentsAllowed !== 'boolean') {
+        return fail(ws, 'subagents allowed is yes or no, not a number', msg.t)
+      }
       /*
        * The one setting that can lock the owner out of his own board, so it is the one that needs a
        * key to turn on.
@@ -6325,6 +6360,14 @@ function handle(ws: WebSocket, msg: ClientMessage) {
         working: l.working ?? kept.working,
         taskAuthority: authority,
         silenceMinutes: l.silenceMinutes ?? kept.silenceMinutes,
+        subagents: l.subagents ?? kept.subagents,
+        /*
+         * Absent and kept rather than absent and defaulted, exactly like `working` above. A window
+         * opened before this field existed still sends the fields it knows about, and defaulting
+         * here would quietly switch subagents back on every time the owner edited a different row
+         * of the same panel.
+         */
+        subagentsAllowed: l.subagentsAllowed ?? kept.subagentsAllowed,
         /*
          * Kept rather than taken from the message. This door predates the setting and a page that
          * does not know about it would send an object without one, which would silently reset the
@@ -6333,6 +6376,12 @@ function handle(ws: WebSocket, msg: ClientMessage) {
          */
         updatePolicy: kept.updatePolicy,
       })
+      /*
+       * Nothing is applied to the board here. `subagents` reaches a card through its settings file,
+       * which is written when the card is launched, so a card already running keeps the figure it
+       * started with and cards turned on after this take the new one. The panel's hint says so
+       * rather than leaving the owner to find out from a card that ignored him.
+       */
       // Every window, because two clients disagreeing about the ceiling is how one of them starts
       // showing refusals it cannot explain.
       return broadcast(limitsMessage(project.id))
@@ -7100,6 +7149,13 @@ const http = createServer((req, res) => {
           store.upsertTask({ ...held, state: nextState, updatedAt: Date.now() })
           const moved = store.getTask(from.projectId, taskId)!
           broadcast({ t: 'task.updated', task: moved })
+          /*
+           * And the sending card's turn now carries the fact that this task finished in it, which is
+           * what earns that turn a history page when it wrote no file. Written here rather than
+           * anywhere earlier on purpose: the task really is in a terminal state by this line, so the
+           * page is describing a row that exists rather than a message that was sent.
+           */
+          if (Ingest.TERMINAL_TASK_STATES.has(nextState)) ingest.noteTaskCompleted(from.id, taskId)
         }
       }
 
@@ -7270,6 +7326,91 @@ const http = createServer((req, res) => {
       if (result.text) return answer(200, result.text)
       const t = result.task
       return answer(200, t ? `task ${t.id} is ${t.state}, owned by ${titleOf(t.ownerId)}` : 'done')
+    })
+    return
+  }
+
+  /*
+   * May this card dispatch another subagent? The question Garden's hook asks before the CLI spawns
+   * one, and the only place Garden refuses a subagent at all.
+   *
+   * It has to be here rather than anywhere downstream. Garden hears about a subagent through
+   * `SubagentStart`, which the CLI fires after its own dispatch, so a check at that point would be
+   * refusing to record something that is already running. `PreToolUse` is the last moment before,
+   * and this is the door it asks. Canon 15, "The five rows, and what holds each one".
+   *
+   * A yes or no rather than a count, which is what makes asking per dispatch worth the round trip.
+   * A card's own `canSpawnAgents` answers the same question at launch, in the settings file, so it
+   * cannot change its mind about a card that is already going. This can.
+   *
+   * Every unknown answers "allow", the same way `/claim` does, and for a stronger reason: a card
+   * that cannot reach Garden must not lose the ability to work. A subagent that ran because the
+   * server was restarting is a smaller failure than a card that cannot dispatch because it was.
+   */
+  if (req.method === 'POST' && req.url === '/dispatch') {
+    let body = ''
+    req.on('data', (c) => {
+      body += c
+      if (body.length > 64 * 1024) req.destroy()
+    })
+    req.on('end', () => {
+      const reply = (obj: unknown) => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(obj))
+      }
+      let msg: any
+      try {
+        msg = JSON.parse(body)
+      } catch {
+        return reply({ ok: true })
+      }
+
+      const sender = resolveSender(req, { from: String(msg?.gardenSessionId ?? ''), kind: 'write' })
+      if (!sender.ok) return sender.code === 404 ? reply({ ok: true }) : reply({ deny: sender.reason })
+      const card = sender.card
+
+      if (subagentsAllowedFor(card, store.getLimits(card.projectId).subagentsAllowed)) {
+        return reply({ ok: true })
+      }
+      const cardSaidNo = card.subagentsAllowed === false
+
+      /*
+       * The sentence canon 15 requires: what was refused, on which card, and where the answer is
+       * changed. "Refuse silently" is the one thing that document forbids outright, and a hook that
+       * answered `deny` with an empty reason would be exactly that, since the CLI shows the reason
+       * and nothing else.
+       *
+       * It also says what is not happening, because a limit that reads as though it might delete
+       * something is a limit nobody dares turn on.
+       */
+      const refusal =
+        (cardSaidNo
+          ? `"${card.title}" is set not to use subagents, so this dispatch is refused. The setting ` +
+            `is "Subagents allowed" on the card itself, under its settings, and it is the card's ` +
+            `own answer rather than the board's.`
+          : `This board does not allow subagents, so "${card.title}" cannot dispatch one. The ` +
+            'setting is "Subagents allowed" in the Ceiling panel, and this card can be given its ' +
+            'own answer there on the card if it needs one while the rest of the board does not.') +
+        ' Nothing already running is stopped and no record is removed. The work itself is not ' +
+        'refused, only doing it in a subagent, so do it here or ask for a card.'
+
+      /*
+       * On the board rather than only in the CLI's transcript. The refusal happens inside a card's
+       * own conversation, which the owner may not be reading, and canon 15 asks for a refusal he
+       * can see. Modelled on `hire.refused`, which exists for the same reason.
+       */
+      const event: AgentEvent = {
+        id: randomUUID(),
+        sessionId: card.id,
+        ts: Date.now(),
+        type: 'subagent.refused',
+        provenance: 'structured',
+        payload: { card: card.title, allowed: false, decidedBy: cardSaidNo ? 'card' : 'board', said: refusal },
+      }
+      store.insertEvent(event)
+      broadcast({ t: 'event', event })
+
+      reply({ deny: refusal })
     })
     return
   }

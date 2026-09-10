@@ -4,8 +4,8 @@
  * SQLite does not shrink on DELETE. It unlinks rows and keeps their bytes in the file's free pages,
  * where they stay readable until the file is rewritten. That is normally just wasted disk. On
  * 2026-09-08 it was more than that: 3,336 archived transcripts were deleted, 497 of them copied out
- * from a project the board had been told to stay out of entirely, and until this
- * runs those bytes are still sitting on the drive.
+ * of a project the board had been told to stay out of entirely, and until this runs those bytes are
+ * still sitting on the drive.
  *
  * VACUUM needs exclusive access, so this REFUSES to run while the server is up rather than
  * competing with it. That is not caution for its own sake: a large write against the live database

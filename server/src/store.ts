@@ -258,6 +258,7 @@ export class Store {
         startedAt INTEGER NOT NULL,
         endedAt INTEGER,
         filesTouched TEXT NOT NULL DEFAULT '[]',
+        tasksCompleted TEXT NOT NULL DEFAULT '[]',
         toolCalls INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_work_session ON work(sessionId, startedAt);
@@ -376,6 +377,16 @@ export class Store {
         roleClass: 'TEXT',
         canSpawnAgents: 'INTEGER NOT NULL DEFAULT 1',
         canUseTeams: 'INTEGER NOT NULL DEFAULT 1',
+        /*
+         * This card's own answer about subagents, and the one column on this table that must stay
+         * nullable. Null is "follow the board", 0 is no, 1 is yes.
+         *
+         * NOT NULL DEFAULT 1 would have been the shape of every other flag here and would have been
+         * wrong: every card that already exists would arrive as an explicit yes, and since a card's
+         * answer beats the board's, the ceiling row would be overridden by every card on the board
+         * on the day it shipped. See BoardLimits.subagentsAllowed and canon 15.
+         */
+        subagentsAllowed: 'INTEGER',
         effort: 'TEXT',
         modelChoice: 'TEXT',
         effortChoice: 'TEXT',
@@ -446,6 +457,17 @@ export class Store {
         kind: "TEXT NOT NULL DEFAULT 'manual'",
         bidirectional: 'INTEGER NOT NULL DEFAULT 0',
       },
+      work: {
+        /*
+         * The tasks a turn finished, alongside the files it wrote.
+         *
+         * Empty on every row written before this column, and that is the honest value rather than a
+         * gap: nothing recorded task transitions per turn before now, so a backfill would be
+         * guessing which turn closed which task from timestamps. An older turn keeps whatever page
+         * its writes earned it and gains nothing it cannot prove.
+         */
+        tasksCompleted: "TEXT NOT NULL DEFAULT '[]'",
+      },
       limits: {
         /*
          * How many cards may be mid-turn at once, as distinct from how many may be awake. A board
@@ -464,6 +486,20 @@ export class Store {
          */
         taskAuthority: "TEXT NOT NULL DEFAULT 'shadow'",
         silenceMinutes: 'INTEGER NOT NULL DEFAULT 60',
+        // How many subagents one card may run at once. Held by the CLI, not here. See
+        // BoardLimits.subagents.
+        subagents: 'INTEGER NOT NULL DEFAULT 5',
+        /*
+         * Whether cards here may dispatch subagents at all, which is the one subagent decision
+         * Garden refuses against itself. Stored as 0 or 1, since SQLite has no boolean. See
+         * BoardLimits.subagentsAllowed.
+         *
+         * Yes on every existing row, and this is the one column on the table whose default can stop
+         * work that is already happening: it is asked at the hook rather than at launch, so a
+         * migration writing 0 would refuse the next dispatch on a card that is running right now,
+         * for a decision nobody made.
+         */
+        subagentsAllowed: 'INTEGER NOT NULL DEFAULT 1',
         /*
          * What may authorize an update restart. Manual on every existing row, for the same reason
          * shadow is the authority default: a board that came back from a restart already allowed to
@@ -725,10 +761,10 @@ export class Store {
     this.db.prepare(`
       INSERT INTO sessions (id,projectId,profileId,adapterId,kind,title,cwd,pid,status,waitingFor,
         statusSince,agentId,parentId,transcriptPath,claudeSessionId,
-        model,permissionMode,managed,x,y,width,height,renderState,pinned,manualPos,collapsed,color,role,size,contextUsed,tokensUsed,contextSource,roleClass,roleClassRunning,closedAt,ownedPaths,generation,canSpawnAgents,canUseTeams,effort,modelChoice,effortChoice,teamSize,reportsTo,fontSize,bodyView,baseWidth,baseHeight,createdAt,exitedAt,exitCode)
+        model,permissionMode,managed,x,y,width,height,renderState,pinned,manualPos,collapsed,color,role,size,contextUsed,tokensUsed,contextSource,roleClass,roleClassRunning,closedAt,ownedPaths,generation,canSpawnAgents,canUseTeams,subagentsAllowed,effort,modelChoice,effortChoice,teamSize,reportsTo,fontSize,bodyView,baseWidth,baseHeight,createdAt,exitedAt,exitCode)
       VALUES (@id,@projectId,@profileId,@adapterId,@kind,@title,@cwd,@pid,@status,@waitingFor,
         @statusSince,@agentId,@parentId,@transcriptPath,@claudeSessionId,
-        @model,@permissionMode,@managed,@x,@y,@width,@height,@renderState,@pinned,@manualPos,@collapsed,@color,@role,@size,@contextUsed,@tokensUsed,@contextSource,@roleClass,@roleClassRunning,@closedAt,@ownedPaths,@generation,@canSpawnAgents,@canUseTeams,@effort,@modelChoice,@effortChoice,@teamSize,@reportsTo,@fontSize,@bodyView,@baseWidth,@baseHeight,@createdAt,@exitedAt,@exitCode)
+        @model,@permissionMode,@managed,@x,@y,@width,@height,@renderState,@pinned,@manualPos,@collapsed,@color,@role,@size,@contextUsed,@tokensUsed,@contextSource,@roleClass,@roleClassRunning,@closedAt,@ownedPaths,@generation,@canSpawnAgents,@canUseTeams,@subagentsAllowed,@effort,@modelChoice,@effortChoice,@teamSize,@reportsTo,@fontSize,@bodyView,@baseWidth,@baseHeight,@createdAt,@exitedAt,@exitCode)
       ON CONFLICT(id) DO UPDATE SET
         title=@title, cwd=@cwd, pid=@pid, status=@status, claudeSessionId=@claudeSessionId,
         waitingFor=@waitingFor, statusSince=@statusSince, agentId=@agentId, parentId=@parentId,
@@ -739,7 +775,8 @@ export class Store {
         contextSource=@contextSource, roleClass=@roleClass, roleClassRunning=@roleClassRunning,
         closedAt=@closedAt, ownedPaths=@ownedPaths, generation=@generation,
         canSpawnAgents=@canSpawnAgents,
-        canUseTeams=@canUseTeams, effort=@effort, modelChoice=@modelChoice,
+        canUseTeams=@canUseTeams, subagentsAllowed=@subagentsAllowed,
+        effort=@effort, modelChoice=@modelChoice,
         effortChoice=@effortChoice, teamSize=@teamSize, reportsTo=@reportsTo,
         baseWidth=@baseWidth, baseHeight=@baseHeight,
         fontSize=@fontSize, bodyView=@bodyView,
@@ -756,6 +793,10 @@ export class Store {
       managed: s.managed ? 1 : 0,
       canSpawnAgents: s.canSpawnAgents ? 1 : 0,
       canUseTeams: s.canUseTeams ? 1 : 0,
+      // Three states rather than two, so `null` has to survive the trip rather than being flattened
+      // into a 0 by the `? 1 : 0` the flags above use. A card with no answer of its own follows the
+      // board, and that is a different thing from a card that said no.
+      subagentsAllowed: s.subagentsAllowed == null ? null : s.subagentsAllowed ? 1 : 0,
       pinned: s.pinned ? 1 : 0,
       manualPos: s.manualPos ? 1 : 0,
       collapsed: s.collapsed ? 1 : 0,
@@ -799,6 +840,17 @@ export class Store {
        */
       taskAuthority: row.taskAuthority ?? DEFAULT_LIMITS.taskAuthority,
       silenceMinutes: row.silenceMinutes ?? DEFAULT_LIMITS.silenceMinutes,
+      subagents: row.subagents ?? DEFAULT_LIMITS.subagents,
+      /*
+       * Stored as 0 or 1 and read back as a boolean, so everything above this line in the codebase
+       * deals in yes and no rather than in a number that happens to be one.
+       *
+       * Null for a row written before the column existed, and null must read as yes: a missing
+       * answer turning into a refusal would stop dispatches on a board whose owner never said no.
+       */
+      subagentsAllowed: row.subagentsAllowed == null
+        ? DEFAULT_LIMITS.subagentsAllowed
+        : !!row.subagentsAllowed,
       // Manual for a row that predates the column, the same direction of safety: a missing policy
       // must never read as permission to restart a card nobody asked to restart.
       updatePolicy: row.updatePolicy ?? DEFAULT_LIMITS.updatePolicy,
@@ -808,15 +860,28 @@ export class Store {
   setLimits(projectId: string, limits: BoardLimits) {
     this.db.prepare(`
       INSERT INTO limits (projectId, running, cardsPerProject, childrenPerCard, working,
-                          taskAuthority, silenceMinutes, updatePolicy, setAt)
+                          taskAuthority, silenceMinutes, subagents, subagentsAllowed, updatePolicy,
+                          setAt)
       VALUES (@projectId, @running, @cardsPerProject, @childrenPerCard, @working,
-              @taskAuthority, @silenceMinutes, @updatePolicy, @setAt)
+              @taskAuthority, @silenceMinutes, @subagents, @subagentsAllowed, @updatePolicy, @setAt)
       ON CONFLICT(projectId) DO UPDATE SET
         running=@running, cardsPerProject=@cardsPerProject,
         childrenPerCard=@childrenPerCard, working=@working,
         taskAuthority=@taskAuthority, silenceMinutes=@silenceMinutes,
+        subagents=@subagents, subagentsAllowed=@subagentsAllowed,
         updatePolicy=@updatePolicy, setAt=@setAt
-    `).run({ projectId, ...limits, setAt: Date.now() })
+    `).run({
+      projectId,
+      ...limits,
+      // better-sqlite3 refuses a JavaScript boolean as a parameter, so the yes or no becomes the 0
+      // or 1 the column holds here, at the single point where this field meets the database.
+      //
+      // This comment was inside the template string above for one run, which made it SQL rather
+      // than a note and turned every ceiling change into `near "/": syntax error`. Nothing on
+      // screen said so: the panel sent, the server refused, and the row read back unchanged.
+      subagentsAllowed: limits.subagentsAllowed ? 1 : 0,
+      setAt: Date.now(),
+    })
   }
 
   // --- tasks ---
@@ -1233,11 +1298,18 @@ export class Store {
 
   upsertWork(w: WorkRecord) {
     this.db.prepare(`
-      INSERT INTO work (id,sessionId,promptId,origin,parentId,ask,startedAt,endedAt,filesTouched,toolCalls)
-      VALUES (@id,@sessionId,@promptId,@origin,@parentId,@ask,@startedAt,@endedAt,@filesTouched,@toolCalls)
+      INSERT INTO work (id,sessionId,promptId,origin,parentId,ask,startedAt,endedAt,filesTouched,
+                        tasksCompleted,toolCalls)
+      VALUES (@id,@sessionId,@promptId,@origin,@parentId,@ask,@startedAt,@endedAt,@filesTouched,
+              @tasksCompleted,@toolCalls)
       ON CONFLICT(id) DO UPDATE SET
-        ask=@ask, endedAt=@endedAt, filesTouched=@filesTouched, toolCalls=@toolCalls
-    `).run({ ...w, filesTouched: JSON.stringify(w.filesTouched) })
+        ask=@ask, endedAt=@endedAt, filesTouched=@filesTouched,
+        tasksCompleted=@tasksCompleted, toolCalls=@toolCalls
+    `).run({
+      ...w,
+      filesTouched: JSON.stringify(w.filesTouched),
+      tasksCompleted: JSON.stringify(w.tasksCompleted ?? []),
+    })
   }
 
   deleteWorkForSession(sessionId: string) {
@@ -1545,14 +1617,27 @@ function hydrateWire(row: any): Wire {
 }
 
 function hydrateWork(row: any): WorkRecord {
-  let files: string[] = []
-  try {
-    const parsed = JSON.parse(row.filesTouched ?? '[]')
-    if (Array.isArray(parsed)) files = parsed.filter((f) => typeof f === 'string')
-  } catch {
-    // A malformed row means no files known, which is not the same as no files touched.
+  return {
+    ...row,
+    // A malformed or missing value reads as nothing known, which is not the same as nothing done.
+    // Both of these are counted by `hasSubstance` with a bare `.length`, so a row from a build
+    // that predates the column has to come back as an empty array here and not as null.
+    filesTouched: stringList(row.filesTouched),
+    tasksCompleted: stringList(row.tasksCompleted),
+    promptId: row.promptId ?? null,
+    parentId: row.parentId ?? null,
   }
-  return { ...row, filesTouched: files, promptId: row.promptId ?? null, parentId: row.parentId ?? null }
+}
+
+/** A JSON array of strings, back from the text it is stored as, or empty if it is anything else. */
+function stringList(raw: unknown): string[] {
+  if (typeof raw !== 'string' || !raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((v) => typeof v === 'string') : []
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -1615,6 +1700,9 @@ function hydrateSession(row: any): TerminalSession {
     // Default to allowed, so a card made before these existed behaves exactly as it did.
     canSpawnAgents: row.canSpawnAgents === undefined ? true : !!row.canSpawnAgents,
     canUseTeams: row.canUseTeams === undefined ? true : !!row.canUseTeams,
+    // Null and undefined both mean this card has not answered, which is not the same as answering
+    // no. Only a stored 0 or 1 becomes a boolean here.
+    subagentsAllowed: row.subagentsAllowed == null ? null : !!row.subagentsAllowed,
     effort: row.effort ?? null,
     modelChoice: row.modelChoice ?? null,
     effortChoice: row.effortChoice ?? null,

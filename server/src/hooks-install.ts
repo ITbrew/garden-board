@@ -125,6 +125,21 @@ export interface SessionPowers {
   roleClass?: string | null
   /** How many agents may run at once. Null leaves the CLI's own default alone. */
   teamSize?: number | null
+  /**
+   * The board's figure for how many subagents one card may run at once, used when the card set no
+   * `teamSize` of its own. See `BoardLimits.subagents`, which is where it comes from.
+   */
+  subagents?: number | null
+  /**
+   * Whether this card may dispatch subagents at all, already resolved.
+   *
+   * The card's own answer against the board's, decided by `subagentsAllowedFor` in the shared
+   * package before it reaches here, so this file holds no opinion about which wins. Garden's hook
+   * asks the same function on every dispatch, and the two must never be able to drift apart.
+   *
+   * Undefined leaves the deny list alone, which is what an older caller that does not pass it gets.
+   */
+  subagentsAllowed?: boolean
   /** An alias like opus, or a full model id. Null means whatever the account defaults to. */
   model?: string | null
   /** low, medium, high, xhigh, max, ultracode or auto. Null leaves it alone. */
@@ -149,8 +164,18 @@ export function buildHookSettings(port: number, powers?: SessionPowers): unknown
    * here: the card says a card may not hire and the CLI happily lets it.
    */
   const deny: string[] = []
+  /*
+   * Three ways to arrive at a denied dispatch, and they are three different questions.
+   *
+   * `canSpawnAgents` is this card's permission to hire agents, `teamSize === 0` is a cap of none,
+   * and `subagentsAllowed` is the resolved answer to the subagent question: the card's own if it
+   * gave one, the board's if it did not. Any of them being no denies the tool.
+   *
+   * The last one is asked again by Garden's hook on every dispatch. This line is what a card is
+   * launched with; the hook is what catches the answer changing while the card is running.
+   */
   const noHiring = powers && (!powers.canSpawnAgents || powers.teamSize === 0)
-  if (noHiring) deny.push('Agent')
+  if (noHiring || powers?.subagentsAllowed === false) deny.push('Agent')
 
   // Whatever this role is not allowed to reach for, from the one shared table.
   const role = powers?.roleClass ? ROLE_POWERS[powers.roleClass] : undefined
@@ -163,9 +188,20 @@ export function buildHookSettings(port: number, powers?: SessionPowers): unknown
   /*
    * A cap on how many agents run at once, which is the one part of team size the CLI enforces.
    * It does not limit how many are hired over a whole session, so the card must not claim it does.
+   *
+   * The card's own figure wins; the board's `subagents` limit is what a card falls back to when it
+   * set none, which is the shape `childrenPerCard` already has. This line is the entire enforcement
+   * of that limit: Garden writes the number into the settings file it was going to pass anyway and
+   * the CLI holds it. Nothing on the server checks it, because Garden hears about a subagent only
+   * after the CLI has dispatched it.
+   *
+   * Zero is not written. `teamSize === 0` means no hiring at all and is already handled by denying
+   * `Agent` above, and an env var of "0" is a value the CLI would have to interpret rather than a
+   * setting it was given.
    */
-  if (powers?.teamSize && powers.teamSize > 0) {
-    env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = String(powers.teamSize)
+  const concurrent = powers?.teamSize && powers.teamSize > 0 ? powers.teamSize : powers?.subagents
+  if (!noHiring && powers?.subagentsAllowed !== false && concurrent && concurrent > 0) {
+    env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = String(concurrent)
   }
 
   /*
