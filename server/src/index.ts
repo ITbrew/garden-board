@@ -5269,6 +5269,19 @@ function handle(ws: WebSocket, msg: ClientMessage) {
             '--cwd', process.cwd(),
             '--exec', process.execPath,
             /*
+             * The page half goes too, and only when the launcher said which one is ours.
+             *
+             * Restarting the backend alone left the owner on the previous build with `builds differ`
+             * beside the version, which is the warning this button exists to clear: "i pressed
+             * restart server button, it brought board back, but itst still on v1.1.11 and it says
+             * builds differ". Canon 22 has the rest of the reasoning.
+             *
+             * `GARDEN_WEB_PORT` is set by `scripts/launch.ps1` and by nothing else, so an instance a
+             * test started carries no page half and the helper leaves every Vite on the machine
+             * alone. A default of 5177 here would have let a test restart stop the owner's real one.
+             */
+            ...(process.env.GARDEN_WEB_PORT ? ['--web-port', String(process.env.GARDEN_WEB_PORT)] : []),
+            /*
              * `execArgv` first, and it is the whole reason this button works.
              *
              * Node splits a command line in two. The flags it consumed itself land in

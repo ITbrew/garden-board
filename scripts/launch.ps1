@@ -252,6 +252,20 @@ if ($serverUp) {
     }
 }
 
+<#
+    Tell the backend which page half is its own.
+
+    Inherited by everything Start-Half launches from here. The server uses it for two things: the URL
+    it prints at startup, which it already did, and the page half its Restart server button replaces,
+    which is new. That button used to restart the backend alone and leave the owner reading the old
+    version with "builds differ" beside it.
+
+    Set here rather than defaulted in the server, because the default would apply to every instance a
+    test starts, and a test restarting itself would then stop the owner's real Vite. Nothing but this
+    launcher sets it. See docs/canonical/22-which-build-is-running.md.
+#>
+$env:GARDEN_WEB_PORT = "$WebPort"
+
 if (-not $serverUp) { Start-Half 'dev:server' }
 $webPortWas = Stop-PortHolder $WebPort
 # Two npm installs racing on the same lockfile is worth avoiding, and starting the second a moment

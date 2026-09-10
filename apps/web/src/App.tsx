@@ -170,7 +170,7 @@ export function App() {
         <button
           className="topbar-btn"
           disabled={!connected}
-          title="Stops the backend and starts it again. Cards that were running come back on their own conversations."
+          title="Stops Garden and starts it again, the page as well as the backend when it was opened from the shortcut, so both halves come back on the same build. Cards that were running come back on their own conversations."
           onClick={() => {
             const n = liveCount
             const ok = window.confirm(
