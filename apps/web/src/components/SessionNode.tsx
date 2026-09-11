@@ -1,6 +1,15 @@
 import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
-import { ROLE_CHAIN, ROLE_POWERS, contextWindowFor, type TerminalSession, type Project } from '@garden/shared'
+import {
+  ROLE_CHAIN,
+  ROLE_POWERS,
+  agentHasEnded,
+  cardIsOff,
+  contextWindowFor,
+  modelAndEffort,
+  type TerminalSession,
+  type Project,
+} from '@garden/shared'
 import { actions, onSessionBytes, useApp } from '../state'
 import { heldTask, onTasks } from '../tasks'
 import { SubagentList, type ListEntry } from './SubagentList'
@@ -185,12 +194,7 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
    * "whether there is a process behind this card at all", so the code now does what the comment
    * already claimed.
    */
-  const off =
-    !isAgent &&
-    (session.pid === null ||
-      session.status === 'stopped' ||
-      session.status === 'failed' ||
-      session.status === 'done')
+  const off = cardIsOff(session)
 
   /*
    * The task this card is accountable for right now, if any.
@@ -219,7 +223,7 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
    * asserting a process that has already exited. This is the observed version of that, the CLI
    * having said it stopped or having stamped an exit time, never silence.
    */
-  const agentEnded = isAgent && (session.status === 'done' || session.exitedAt !== null)
+  const agentEnded = agentHasEnded(session)
 
   /*
    * The card that hired this one, looked up rather than passed in, since the node's data carries
@@ -278,51 +282,14 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
   /*
    * The folded line, short enough to survive a narrow card.
    *
-   * Two rules here. It never mixes a choice with an observation in the same slot: a model the
-   * owner picked reads as itself, a model only the CLI reported reads with a "running" prefix, and
-   * a choice that has not taken effect yet is marked pending. And it never says "hires any", since
-   * the CLI's own default of twenty is still a limit; no cap set is what that actually means.
+   * The model and effort wording lives in `modelAndEffort` rather than here, because the rail's
+   * lists name the same two things and the owner reads that rail to avoid opening every card. What
+   * a row may and may not claim is written where the function is.
    *
-   * The "running" prefix is only true while something is. A blind reviewer looking at a stopped
-   * card read "off" in the header and "running opus-5 · running medium" underneath it, and could
-   * not say which was true. Both were: the card was off, and those were the last values the CLI
-   * reported. So an observation on a card with no process says it was the last one seen rather than
-   * the current one, which is the same fact without the claim. A finished agent is the same case
-   * arrived at by a different route, so it reads the same way.
+   * `hiringBit` stays local and never says "hires any", since the CLI's own default of twenty is
+   * still a limit; no cap set is what that actually means.
    */
-  const seen = off || agentEnded ? 'last' : 'running'
-  /*
-   * An agent card reports only what was watched, never what was chosen.
-   *
-   * `modelChoice` and `effortChoice` are copied onto a spawned card from whoever hired it, at the
-   * instant it was spawned. On a session card they mean "what the owner set, for the next start".
-   * On an agent card there is no next start and the value was never the agent's own, so a "pending"
-   * state there would be describing a change that can never take effect. What is left is what the
-   * CLI reported for this agent, and the words "not reported" when it said nothing.
-   */
-  const modelBit = isAgent
-    ? session.model
-      ? `${seen} ${session.model.replace(/^claude-/, '')}`
-      : 'model not reported'
-    : session.modelChoice
-      ? session.model && session.model !== session.modelChoice
-        ? `${session.modelChoice} pending`
-        : session.modelChoice
-      : session.model
-        ? `${seen} ${session.model.replace(/^claude-/, '')}`
-        : 'default model'
-
-  const effortBit = isAgent
-    ? session.effort
-      ? `${seen} ${session.effort} effort`
-      : 'effort not reported'
-    : session.effortChoice
-      ? session.effort && session.effort !== session.effortChoice
-        ? `${session.effortChoice} pending`
-        : session.effortChoice
-      : session.effort
-        ? `${seen} ${session.effort} effort`
-        : 'default effort'
+  const { model: modelBit, effort: effortBit } = modelAndEffort(session)
 
   /*
    * The role, but only when the board and the process disagree.

@@ -144,6 +144,24 @@ body {
 .row.is-active { background: var(--bg-raised); color: var(--text); border-color: var(--line-strong); }
 .row-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-count { color: var(--text-faint); font-size: 11px; }
+/*
+ * A rail row that carries a second line: the card's title, then what it is running as.
+ *
+ * The model and effort line is indented to the title rather than to the row, past the dot and its
+ * gap (7px + 8px), so the two lines read as one card's entry and the dots still line up down the
+ * list. It never wraps: this list is scanned, and a card called after a long path would otherwise
+ * push every row below it out of alignment.
+ */
+.row--card { flex-direction: column; align-items: stretch; gap: 3px; }
+.row-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.row-sub {
+  padding-left: 15px;
+  color: var(--text-faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .swatch { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 8px; }
 /*
  * Wraps at any character, because what this line most often holds is a path.
@@ -197,17 +215,32 @@ body {
   text-align: right;
 }
 .rail-limit-row input:focus { outline: none; border-color: var(--accent); }
-/* The yes or no row. Same width, box and font as the number inputs beside it so the five rows read
-   as one panel, and left-aligned rather than right, because "Yes" is a word and the numbers are
-   figures: a right-aligned word under a right-aligned column of digits looks like a stray value. */
+/* The yes or no row. The same box, border and font as the number inputs beside it so the five rows
+   read as one panel, and left-aligned rather than right, because "Yes" is a word and the numbers are
+   figures: a right-aligned word under a right-aligned column of digits looks like a stray value.
+
+   The word was clipped at this width for a day, because a select ALSO draws a dropdown arrow inside
+   its box and Chrome's is about a third of 52px wide: the row read "Ye". Widening the box fixed the
+   clipping and broke the column, which the owner saw immediately: "make 'yes' drop down size in line
+   with the other buttons, doesnt look right". So the arrow is replaced rather than the width. The
+   native one is turned off and a small caret is drawn in the right-hand padding, which is space the
+   text was never going to use, so the box is the same 52px as the inputs and the word still fits. */
 .rail-limit-row__choice {
   width: 52px;
   flex: 0 0 auto;
-  background: var(--bg);
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--bg);
+  /* A chevron, inline rather than fetched: an artifact of this app must not need a network request
+     to draw a control, and a data URI cannot 404 the way a missing asset can. */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%237a8699' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 5px center;
+  background-size: 7px 5px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   color: var(--text);
-  padding: 4px 6px;
+  padding: 4px 15px 4px 6px;
   font: 12px/1.2 'Cascadia Mono', Consolas, monospace;
 }
 .rail-limit-row__choice:focus { outline: none; border-color: var(--accent); }

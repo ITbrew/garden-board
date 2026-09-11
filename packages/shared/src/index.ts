@@ -93,6 +93,86 @@ export function drawnOnBoard(card: { kind: CardKind; closedAt: number | null }):
   return card.closedAt === null && card.kind !== 'subagent'
 }
 
+/** What a card's model and effort are called, everywhere they are named. */
+export interface ModelEffortCard {
+  kind: CardKind
+  pid: number | null
+  status: string
+  exitedAt: number | null
+  model: string | null
+  modelChoice: string | null
+  effort: string | null
+  effortChoice: string | null
+}
+
+/** No process behind this card. An agent card is never "off": it ran and finished. */
+export function cardIsOff(card: Pick<ModelEffortCard, 'kind' | 'pid' | 'status'>): boolean {
+  return (
+    card.kind === 'session' &&
+    (card.pid === null || card.status === 'stopped' || card.status === 'failed' || card.status === 'done')
+  )
+}
+
+/** An agent card whose run is over, which reads the same way as a card that is off. */
+export function agentHasEnded(card: Pick<ModelEffortCard, 'kind' | 'status' | 'exitedAt'>): boolean {
+  return card.kind !== 'session' && (card.status === 'done' || card.exitedAt !== null)
+}
+
+/**
+ * What to call this card's model and effort, said the same way wherever they are shown.
+ *
+ * Two surfaces name these: the card's own powers strip and the rail's lists. One function, because a
+ * rail saying one thing while the card beside it says another is two answers to the same question,
+ * and the owner reads the rail precisely to avoid opening each card.
+ *
+ * A model is named and nothing else: "opus-5 . high effort", running or not. Both prefixes it used to
+ * carry are gone at the owner's instruction, first "running" and then "last": "remove the words
+ * 'running' from 'running opus-5' 'running high effort'", then "do the same for 'last'".
+ *
+ * What the prefixes were for is worth recording, because it is why they could go. A blind reviewer
+ * read "off" in a card's header and "running opus-5" underneath it and could not say which was true;
+ * both were, and the fix at the time was to mark the stale observation as "last". With "running"
+ * gone, no row claims a live process at all. A bare model name is a name rather than a claim, and
+ * what says whether anything is behind it is the card's own status dot and the rail's headings, both
+ * of which are beside it.
+ *
+ * A choice the live process has not taken up is still marked pending, because that is a real
+ * disagreement between two values rather than a label on one. A card with neither reads "default",
+ * because Garden does not know what the CLI's default resolves to and will not guess a name.
+ *
+ * An agent card reports only what was watched. `modelChoice` is copied onto it from whoever hired it
+ * at the instant it spawned, and there is no next start for it to apply at, so a pending state there
+ * would describe a change that can never happen.
+ */
+export function modelAndEffort(card: ModelEffortCard): { model: string; effort: string } {
+  const isAgent = card.kind !== 'session'
+  const model = isAgent
+    ? card.model
+      ? card.model.replace(/^claude-/, '')
+      : 'model not reported'
+    : card.modelChoice
+      ? card.model && card.model !== card.modelChoice
+        ? `${card.modelChoice} pending`
+        : card.modelChoice
+      : card.model
+        ? card.model.replace(/^claude-/, '')
+        : 'default model'
+
+  const effort = isAgent
+    ? card.effort
+      ? `${card.effort} effort`
+      : 'effort not reported'
+    : card.effortChoice
+      ? card.effort && card.effort !== card.effortChoice
+        ? `${card.effortChoice} pending`
+        : card.effortChoice
+      : card.effort
+        ? `${card.effort} effort`
+        : 'default effort'
+
+  return { model, effort }
+}
+
 /**
  * May this card dispatch a subagent? Asked once, answered the same way everywhere.
  *

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { drawnOnBoard, modelAndEffort, type TerminalSession } from '@garden/shared'
 import { actions, getLayouts, getLimits, onLayouts, onLimits, useApp } from '../state'
 import { LimitsPanel } from './LimitsPanel'
 /*
@@ -7,6 +8,40 @@ import { LimitsPanel } from './LimitsPanel'
  * through them, and `docFiles` is still filled by the server and still read by whatever opens a
  * document. What went is this file's use of them.
  */
+
+/**
+ * One card in the rail: its status, its title, and what it is running as.
+ *
+ * The same row in Running now and in Offline, because the owner asked for the second line in both
+ * and two copies of it would be two chances to word the same fact differently. What separates the
+ * lists is which cards are in them, never how a card is described.
+ *
+ * The second line is `modelAndEffort`, which is also what the card's own powers strip shows. On a
+ * running card it names what the CLI reported; on a card with no process it names what the owner
+ * chose for the next start, or what it last ran as, and says which. That is the whole reason this
+ * list can be trusted without opening anything.
+ *
+ * A button in both lists: a card that is off is still on the board and still worth jumping to. This
+ * focuses the card and never starts it, which is what Play in the foot is for.
+ */
+function CardRow({ session, focused }: { session: TerminalSession; focused: boolean }) {
+  const { model, effort } = modelAndEffort(session)
+  return (
+    <button
+      className={`row row--card ${focused ? 'is-active' : ''}`}
+      title={`${session.title}\n${model} · ${effort}`}
+      onClick={() => actions.focus(session.id)}
+    >
+      <span className="row-line">
+        <span className={`dot dot--${session.status}`} />
+        <span className="row-label">{session.title}</span>
+      </span>
+      <span className="row-sub">
+        {model} · {effort}
+      </span>
+    </button>
+  )
+}
 
 export function Sidebar({ onFold }: { onFold?: () => void }) {
   const projects = useApp((s) => s.projects)
@@ -118,6 +153,29 @@ export function Sidebar({ onFold }: { onFold?: () => void }) {
       sessions
         .filter((s) => s.projectId === activeProjectId && s.closedAt !== null)
         .sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0)),
+    [sessions, activeProjectId],
+  )
+
+  /*
+   * The cards on the board with nothing running behind them.
+   *
+   * The complement of `liveSessions` over what the board actually draws, so the two lists together
+   * are exactly the cards on screen and no card can be in both or in neither. `drawnOnBoard` rather
+   * than a kind check written out here, because a subagent card is not on the board and a list of
+   * "offline cards" that included two dozen spent agents would answer a question nobody asked.
+   *
+   * Wider than `startableSessions` above on purpose: a finished teammate card is offline and is
+   * drawn, but Play would not start it, and the rail should not quietly leave a card off a list of
+   * what is on the board because one button cannot act on it.
+   *
+   * By title, because this is a reference list. Sorting it by when each card stopped would reorder
+   * itself under the owner while he was reading it.
+   */
+  const offlineSessions = useMemo(
+    () =>
+      sessions
+        .filter((s) => s.projectId === activeProjectId && drawnOnBoard(s) && s.pid === null)
+        .sort((a, b) => a.title.localeCompare(b.title)),
     [sessions, activeProjectId],
   )
 
@@ -320,21 +378,49 @@ export function Sidebar({ onFold }: { onFold?: () => void }) {
         rather than as spacing. The stretch moved to a spacer below the last list, so the sections
         stay together at the top and the bottom controls still sit where they did.
       */}
+      {/*
+        One row, used by both lists.
+
+        The model and effort come from the card's own function rather than from anything written
+        here, so the rail and the card can never name the same thing two ways. The line under the
+        title is what the owner asked these lists for: "both sections show the current model/effort
+        level for easier reference", and reading it is the point of not having to open each card.
+
+        A row is a button in both lists because a card that is off is still on the board and still
+        worth jumping to. Clicking one focuses the card; it does not start it.
+      */}
       <section className="rail-section">
         <h3 className="rail-title">Running now</h3>
         <ul className="list">
           {liveSessions.map((s) => (
             <li key={s.id}>
-              <button
-                className={`row ${focused.includes(s.id) ? 'is-active' : ''}`}
-                onClick={() => actions.focus(s.id)}
-              >
-                <span className={`dot dot--${s.status}`} />
-                <span className="row-label">{s.title}</span>
-              </button>
+              <CardRow session={s} focused={focused.includes(s.id)} />
             </li>
           ))}
           {liveSessions.length === 0 && <li className="hint">Nothing running in this project.</li>}
+        </ul>
+      </section>
+
+      {/*
+        The cards on the board with nothing running behind them.
+
+        Directly under Running now, at the owner's request, so the two read as one picture of the
+        project: what is costing something, and what is sitting there. Each row carries the same
+        model and effort line, which on a card with no process says what it will start as or what it
+        last ran as rather than asserting either is live.
+
+        The heading stays when the list is empty, unlike the launchers and the layouts, because an
+        empty Offline list is a fact worth reading: everything on this board is running.
+      */}
+      <section className="rail-section">
+        <h3 className="rail-title">Offline</h3>
+        <ul className="list">
+          {offlineSessions.map((s) => (
+            <li key={s.id}>
+              <CardRow session={s} focused={focused.includes(s.id)} />
+            </li>
+          ))}
+          {offlineSessions.length === 0 && <li className="hint">Every card in this project is running.</li>}
         </ul>
       </section>
 

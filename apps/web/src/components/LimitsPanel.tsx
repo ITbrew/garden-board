@@ -338,7 +338,13 @@ export function LimitsPanel({
         hint="How many cards one card may have reporting to it, when that card has not set a team size of its own. Named for the orchestrator because that is the card that does the spawning on this board, but it holds any parent that set no figure of its own."
         value={limits.childrenPerCard}
         counted={null}
-        unit="per parent card, at any one moment"
+        /*
+         * No unit line, at the owner's instruction on 2026-09-11: "remove 'per parent card, at any
+         * one moment'". Every other uncounted row still carries one, and canon 15's reasoning for
+         * them stands: a bare number that could be four parents, four spawns each, or four at a
+         * time is a row nobody edits. What this row has that they do not is a label naming who it
+         * governs, and it was the longest sub-line in the panel.
+         */
         locked={locked}
         onCommit={(n) => commit({ childrenPerCard: n })}
       />
