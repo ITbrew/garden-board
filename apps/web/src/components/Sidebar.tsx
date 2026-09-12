@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { drawnOnBoard, modelAndEffort, type TerminalSession } from '@garden/shared'
-import { actions, getLayouts, getLimits, onLayouts, onLimits, useApp } from '../state'
+import { actions, getLayouts, getLimits, getLoops, onLayouts, onLimits, onLoops, useApp } from '../state'
 import { LimitsPanel } from './LimitsPanel'
+import { LoopsPanel } from './LoopsPanel'
 /*
  * This rail no longer arranges anything, so it no longer reads the layout table, the wires or the
  * documents. `layout.ts` and `hierarchy.ts` are untouched: the canvas still lays a spawned team out
@@ -103,6 +104,13 @@ export function Sidebar({ onFold }: { onFold?: () => void }) {
   useEffect(() => {
     if (activeProjectId) actions.refreshLimits(activeProjectId)
   }, [activeProjectId, openCardCount])
+
+  // The loops on this board. The server pushes the list after every change and firing; this
+  // asks once per board so the section is not blank until the first firing.
+  const loops = useSyncExternalStore(onLoops, () => getLoops(activeProjectId), () => undefined)
+  useEffect(() => {
+    if (activeProjectId) actions.listLoops(activeProjectId)
+  }, [activeProjectId])
 
   /*
    * The sessions with a process behind them right now.
@@ -254,6 +262,23 @@ export function Sidebar({ onFold }: { onFold?: () => void }) {
         <section className="rail-section">
           <h3 className="rail-title">Ceiling</h3>
           <LimitsPanel projectId={active.id} limits={limitsData.limits} counted={limitsData.counted} />
+        </section>
+      )}
+
+      {/*
+        Loops: a prompt typed into one card every N minutes, switched on and off here. The owner:
+        "create loop section in the ceiling menus that allows me to toggle loops on/off and select
+        frequency of checking in minutes."
+      */}
+      {active && (
+        <section className="rail-section">
+          {/* The title belongs to the panel rather than to this file, because it folds and the
+              panel is what remembers whether it is folded. */}
+          <LoopsPanel
+            projectId={active.id}
+            loops={loops ?? []}
+            cards={sessions.filter((s) => s.projectId === active.id && drawnOnBoard(s))}
+          />
         </section>
       )}
 

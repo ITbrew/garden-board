@@ -11,6 +11,7 @@ import type {
   WorkRecord,
   SavedLayout,
   BoardLimits,
+  CardLoop,
 } from '@garden/shared'
 import { conn } from './connection'
 import { dropPreview, feedPreview, resizePreview } from './preview'
@@ -506,6 +507,26 @@ export function onLimits(fn: () => void) {
   }
 }
 
+/*
+ * The loops on each board: a prompt typed into a card every N minutes. The server sends the whole
+ * list after every change and every firing, so `lastOutcome` on screen is the server's, never a
+ * guess from this tab.
+ */
+const boardLoops = new Map<string, CardLoop[]>()
+const loopSubs = new Set<() => void>()
+
+export function getLoops(projectId: string | null) {
+  if (!projectId) return undefined
+  return boardLoops.get(projectId)
+}
+
+export function onLoops(fn: () => void) {
+  loopSubs.add(fn)
+  return () => {
+    loopSubs.delete(fn)
+  }
+}
+
 /** One side of a spawned agent's conversation, as its card shows it. */
 export type AgentTurn = {
   role: 'asked' | 'said' | 'did'
@@ -804,6 +825,11 @@ conn.on((msg: ServerMessage) => {
     case 'layouts': {
       layouts.set(msg.projectId, msg.layouts)
       for (const fn of layoutSubs) fn()
+      return
+    }
+    case 'loops': {
+      boardLoops.set(msg.projectId, msg.loops)
+      for (const fn of loopSubs) fn()
       return
     }
     case 'limits': {
@@ -1311,13 +1337,26 @@ export const actions = {
    * an object literal passed straight to a call: once the wire type grows `x`/`y` this needs no
    * change, and until then the position is simply not read yet rather than rejected.
    */
-  createDoc(projectId: string, relPath: string, x?: number, y?: number) {
-    const msg: { t: 'doc.create'; projectId: string; relPath: string; x?: number; y?: number } = {
+  /**
+   * `openIfExists` is for the To Do card and nothing else so far: asking for the project's to-do
+   * list is asking for the one that is already there, where naming a new note over an existing file
+   * is a mistake worth refusing.
+   */
+  createDoc(projectId: string, relPath: string, x?: number, y?: number, openIfExists?: boolean) {
+    const msg: {
+      t: 'doc.create'
+      projectId: string
+      relPath: string
+      x?: number
+      y?: number
+      openIfExists?: boolean
+    } = {
       t: 'doc.create',
       projectId,
       relPath,
       x,
       y,
+      ...(openIfExists ? { openIfExists: true } : {}),
     }
     conn.send(msg)
   },
@@ -1635,6 +1674,16 @@ export const actions = {
    */
   setLimits(projectId: string, limits: BoardLimits) {
     conn.send({ t: 'limits.set', projectId, limits })
+  },
+
+  listLoops(projectId: string) {
+    conn.send({ t: 'loop.list', projectId })
+  },
+  setLoop(projectId: string, loop: { id?: string; sessionId: string; prompt: string; minutes: number; enabled: boolean }) {
+    conn.send({ t: 'loop.set', projectId, loop })
+  },
+  deleteLoop(projectId: string, id: string) {
+    conn.send({ t: 'loop.delete', projectId, id })
   },
 
   listLayouts(projectId: string) {

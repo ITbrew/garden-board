@@ -18,10 +18,33 @@ const CONTROL_PLANE_DOC = resolve(
   '18-orchestrator-control-plane.md',
 )
 
+/**
+ * The to-do procedure, offered to every card rather than to one role.
+ *
+ * Both halves of it are in one file because both halves are the same rule seen from two ends: the
+ * orchestrator writes `@Card title` on a line and the card reads its own name off it. A card that
+ * only knew its half would tick items and never understand why the list it sees is a subset, and the
+ * owner asked for the awareness on both sides: "orchestrators need to havea awareness of todo list
+ * and same with session cards."
+ *
+ * The one-line version is in the startup roots, which is what makes a card aware it exists at all. A
+ * pointer alone would not: a card does not open a reading row until something matches its condition.
+ */
+const TO_DO_DOC = join(DATA_DIR, 'roots', 'detail', 'the-to-do-list.md')
+
 function readingRowsFor(roleClass: string | null, base: ReadingRow[]): ReadingRow[] {
-  if (roleClass !== 'orchestrator') return base
-  return [
+  const withToDo: ReadingRow[] = [
     ...base,
+    {
+      what: 'the-to-do-list.md',
+      when: 'you are working from the to-do list, handing items out, or your loop has told you to ' +
+        'check it',
+      path: TO_DO_DOC,
+    },
+  ]
+  if (roleClass !== 'orchestrator') return withToDo
+  return [
+    ...withToDo,
     {
       what: '18-orchestrator-control-plane.md',
       when: 'you want to drive the board directly — create or wire cards, open a history or ' +
@@ -112,6 +135,12 @@ condition that means open it now. Read on that condition, not up front, because 
 feel prepared cancels the reason this board exists.
 
 Write to them before you finish a piece of work, not after you are asked to.
+
+## Your to-do list
+
+\`TODO.md\` in the project is the list; items ending \`@<your title>\` are yours. Tick them in that file:
+every card's list is a view of it, not a copy. None of yours left, switch your own loop off with
+\`%GARDEN_BIN%\garden-loop.mjs --off --card "<your title>"\`.
 `
 
 /**
@@ -140,6 +169,9 @@ Hold the registry, not the contents: which cards exist, what each is for, where 
 
 Ask the owner a question only when the answer changes what happens next. One question, one sentence,
 two to four short options, and say which you recommend and why.
+
+You keep \`TODO.md\`, the project's list. Delegate an item by ending its line with \`@Card title\`, then
+start that card's loop.
 `,
   boss: `# Boss
 
@@ -485,13 +517,61 @@ export function composeCardRoots(
 }
 
 /**
+ * Copy in any skill the role keeps that this card does not have yet.
+ *
+ * A snapshot taken once is a snapshot of the library as it stood that day, so adding a skill to a
+ * role's keep list used to reach every card hired afterwards and none of the cards already on the
+ * board. That is the wrong half: the cards that have been running longest are the ones whose
+ * procedure is most out of date, and nothing calls `refreshCardRoots`, which re-copies only what the
+ * manifest already names.
+ *
+ * It only ever adds. A folder that is already there is left exactly as it is, whether Garden put it
+ * there or the card did, so tailoring survives and nothing the card collected is overwritten. Only
+ * what this call actually copied is recorded in the manifest, because the manifest's claim is "Garden
+ * put this here" and a refresh is entitled to overwrite what it names.
+ *
+ * The cost, stated rather than discovered later: a skill taken off one card by hand comes back at its
+ * next launch. There is no removal path today, so nothing that exists is undone, but one would have
+ * to record the removal rather than rely on absence.
+ */
+function topUpSkills(
+  cardDir: string,
+  card: { roleClass: string | null },
+  sources: { hirerDir?: string | null; projectPath?: string | null },
+  now: string,
+): void {
+  const keeps = (card.roleClass ? ROLE_SKILLS[card.roleClass] : undefined) ?? DEFAULT_SKILLS
+  const manifest = readManifest(cardDir)
+  const skillDir = join(cardDir, 'skills')
+  const from = skillSources(sources.hirerDir ?? null, sources.projectPath ?? null)
+  const added: string[] = []
+  for (const name of keeps) {
+    if (isDir(join(skillDir, name))) continue
+    mkdirSync(skillDir, { recursive: true })
+    if (snapshotSkill(name, skillDir, from)) added.push(name)
+  }
+  if (added.length === 0) return
+  const next: RootsManifest = {
+    skills: [...manifest.skills, ...added.filter((n) => !manifest.skills.includes(n))],
+    agents: manifest.agents,
+    refreshed: now,
+  }
+  mkdirSync(join(cardDir, '.claude-plugin'), { recursive: true })
+  writeFileSync(join(cardDir, '.claude-plugin', MANIFEST), JSON.stringify(next, null, 2) + '\n', 'utf8')
+}
+
+/**
  * Make the card's directory loadable, without re-snapshotting anything.
  *
  * Called on every launch, so it must be cheap and it must not undo tailoring. It writes only the
  * two files that are unambiguously Garden's, the plugin manifest and the reading index, and it
  * composes from scratch exactly once, when the card has no manifest yet and therefore has never
- * been composed. Re-copying skills here would make the snapshot a live mirror in everything but
- * name, and the owner chose snapshot precisely so two cards of the same role can differ.
+ * been composed.
+ *
+ * It does top up skills, and that reverses an earlier note here which said re-copying them would
+ * make the snapshot a live mirror. A mirror overwrites; this does not. It copies only what is
+ * missing and never touches a folder that is already there, so two cards of the same role still
+ * differ in everything either of them was tailored with. See `topUpSkills`.
  */
 export function ensureCardRoots(
   cardDir: string,
@@ -505,6 +585,7 @@ export function ensureCardRoots(
     return
   }
   writePluginManifest(cardDir, card.title)
+  topUpSkills(cardDir, card, sources, now)
   /*
    * Rewritten every launch now, not only when a caller happens to pass rows. This one small index
    * file is cheap, and it is the only way a card already hired before an orchestrator-only entry

@@ -426,6 +426,11 @@ export class PtyManager extends EventEmitter {
     return this.live.has(sessionId)
   }
 
+  /** How many processes are still up, which is what a shutdown waits on before it leaves. */
+  liveCount(): number {
+    return this.live.size
+  }
+
   kill(sessionId: string) {
     const e = this.live.get(sessionId)
     if (!e) return

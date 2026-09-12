@@ -125,6 +125,28 @@ body {
   font-weight: 600;
 }
 
+/*
+ * A rail title that folds its section away.
+ *
+ * The twisty sits in the title rather than beside it, so the whole line reads as one control and
+ * the count keeps the far edge. The count is what the title says when the section is shut: "2/3"
+ * when something is running, a plain total when nothing is, because a folded section that says
+ * nothing about its contents has to be opened to answer the only question worth asking of it.
+ */
+.rail-title--fold { display: flex; align-items: center; gap: 6px; }
+.rail-title--fold .twisty { color: var(--text-faint); }
+.rail-title__count {
+  margin-left: auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-faint);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+.rail-title__count.is-on { color: var(--ok); }
+
 .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .row {
   display: flex;
@@ -255,6 +277,107 @@ body {
   color: var(--text);
   font: 12px/1.2 'Cascadia Mono', Consolas, monospace;
   text-align: right;
+}
+
+/* --- loops --- */
+
+.rail-loops { display: flex; flex-direction: column; gap: 10px; }
+.rail-loop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.rail-loop.is-off { opacity: 0.6; }
+.rail-loop__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/*
+ * What the loop IS, never a control. The button beside it says what pressing it does, and these two
+ * were one checkbox labelled "On" until the owner pointed out that it answered neither question.
+ * The dot carries the state at a glance and the word carries it exactly, the same pairing the
+ * card rows above use for a session.
+ */
+.rail-loop__state {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.rail-loop__state .dot { background: var(--text-faint); }
+.rail-loop__state.is-on { color: var(--ok); }
+.rail-loop__state.is-on .dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px rgba(45, 212, 191, 0.7);
+}
+/*
+ * Start, Stop and Delete, in that order and in one line, as the owner drew it. Equal thirds so the
+ * one you want is always in the same place on every loop in the list, rather than sliding sideways
+ * because one card's last outcome was longer than another's.
+ */
+.rail-loop__buttons { display: flex; gap: 6px; }
+.rail-loop__buttons .btn { flex: 1 1 0; text-align: center; }
+/* Left of the card's name, so the loops fold from the same edge the rail's sections do. */
+.rail-loop__fold { flex: 0 0 auto; }
+.rail-loop__card { flex: 1; color: var(--text); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-loop__switch { display: flex; align-items: center; gap: 6px; cursor: pointer; flex: 0 0 auto; }
+.rail-loop__every { display: flex; align-items: center; gap: 6px; }
+.rail-loop__every input {
+  width: 52px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 3px 6px;
+  font: 12px/1.2 'Cascadia Mono', Consolas, monospace;
+  text-align: right;
+}
+.rail-loop__every input:focus { outline: none; border-color: var(--accent); }
+/*
+ * The prompt a loop types, and it is the one field here worth reading rather than glancing at.
+ *
+ * It was two lines tall, which is where the owner found it: "its a little bit crammed as a feature
+ * on the bar in the text section, needs more vertical space". A prompt is a sentence or three, and
+ * at two lines the sentence he had written scrolled inside a box the size of a label.
+ *
+ * Nine lines, measured rather than chosen. The check-in prompt the rail offers by default is 144
+ * characters and needs 117px at this width, so a box that cannot show that one is still the box he
+ * complained about. The margin above it is deliberate: a height that exactly equals the text it has
+ * to hold fails the moment a font renders a pixel taller. `resize: vertical` handles a longer one.
+ */
+.rail-loop__prompt {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 148px;
+  resize: vertical;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 6px 8px;
+  font: 11.5px/1.5 inherit;
+}
+.rail-loop__prompt:focus { outline: none; border-color: var(--accent); }
+.rail-loop__foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.rail-loop__last { color: var(--text-faint); font-size: 10.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The count sits at the right of the same line as the last outcome, and never shrinks to make room
+ * for it: the outcome is the part that can run long and the part that can be cut. */
+.rail-loop__runs { flex: 0 0 auto; color: var(--text-faint); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.rail-loop__new select {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 11.5px;
 }
 
 /* --- buttons --- */
@@ -707,6 +830,89 @@ body {
   line-height: 1;
 }
 .twisty:hover { color: var(--text); }
+
+/*
+ * The to-do bar, above a card rather than inside it.
+ *
+ * Owner: "make the task bar outside above the card instead of in the text section. similar to how
+ * context bar exists but horizontally above for to-do list." So it is laid out like a column header
+ * and not like a card: one line, the card's own width, nothing that can be dragged or selected.
+ *
+ * The track is drawn at zero as well as at full, because a progress bar that appears only once
+ * something is done cannot be told apart from a list nobody has started.
+ */
+.todobar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.todobar--main { border-color: #2b3a4f; }
+.todobar__track {
+  flex: 0 0 62px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+.todobar__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 160ms ease-out;
+}
+.todobar__fill.is-all { background: var(--ok); }
+.todobar__count { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--text-faint); }
+/*
+ * Says what the fraction counts, so the chip beside it reads as the remainder rather than as a
+ * second, contradictory list.
+ *
+ * It never shrinks. It was allowed to, on the reasoning that a word is the cheapest thing to lose,
+ * and a blind reader got "0/2 do…" for its trouble: a truncated word is worse than no word, because
+ * it takes the space and returns nothing. The item chip is what absorbs a narrow bar now, and it can
+ * afford to, since it ends in an ellipsis on purpose and its full text is on its tooltip.
+ */
+.todobar__word { flex: 0 0 auto; color: var(--text-faint); }
+/* Each open item, and clicking one ticks it off in the file. */
+.todobar__item {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+.todobar__item:hover { color: var(--text); border-color: var(--accent); }
+.todobar__more { flex: 0 0 auto; color: var(--text-faint); }
+.todobar__done { flex: 0 0 auto; color: var(--ok); }
+.todobar__loop,
+.todobar__looping { flex: 0 0 auto; margin-left: auto; }
+.todobar__loop {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+.todobar__loop:hover { color: var(--text); border-color: var(--accent); }
+.todobar__looping { color: var(--ok); text-transform: uppercase; letter-spacing: 0.05em; font-size: 9.5px; }
 
 .node--doc { border-color: #1d2a3a; }
 .node-head--doc { background: #101826; }

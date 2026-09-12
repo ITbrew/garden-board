@@ -20,7 +20,7 @@
  * away from the owner's real one.
  *
  *   node garden-restart.mjs --port 5178 --cwd C:/Garden --exec <path> --args <json array>
- *                           [--web-port 5177]
+ *                           [--web-port 5177] [--pid <old server pid>]
  */
 import { execFileSync, spawn } from 'node:child_process'
 import { connect } from 'node:net'
@@ -37,6 +37,9 @@ const port = Number(arg('port'))
 // stop the owner's real Vite.
 const webPort = Number(arg('web-port')) || 0
 const cwd = arg('cwd') || process.cwd()
+// The old server's own pid, for the case where it will not leave. Absent means nothing is ever
+// force-killed here: the helper waits on the port and gives up, which is what it always did.
+const oldPid = Number(arg('pid')) || 0
 const exec = arg('exec')
 let args = []
 try {
@@ -75,10 +78,40 @@ while (Date.now() < deadline) {
   if (!(await listening(port))) break
   await sleep(250)
 }
+/*
+ * The wait ran out and the port is still held. On 2026-09-11 that was the owner's board: the old
+ * backend stopped in native teardown after killing its one live ConPTY, still listening, answering
+ * nothing, for hours. Exiting here, which is what this did, leaves that corpse holding the port and
+ * the owner with a window that cannot connect and a shortcut that thinks the backend is fine.
+ *
+ * So when the server said which pid it is, end it by force and wait once more. Only that pid, and
+ * only after the polite wait failed: a backend that shuts down cleanly is never touched by this.
+ */
+if ((await listening(port)) && oldPid && oldPid !== process.pid) {
+  try {
+    process.kill(oldPid, 'SIGKILL')
+  } catch {
+    // Already gone, in which case the port is about to free on its own.
+  }
+  const hardDeadline = Date.now() + 10_000
+  while (Date.now() < hardDeadline) {
+    if (!(await listening(port))) break
+    await sleep(250)
+  }
+}
 if (await listening(port)) process.exit(1)
 
-// Detached and with its handles let go, so this helper exiting cannot take the new server with it.
-const child = spawn(exec, args, { cwd, detached: true, stdio: 'ignore', env: process.env })
+/*
+ * Detached and with its handles let go, so this helper exiting cannot take the new server with it.
+ *
+ * `windowsHide` matters as much as `detached` here, and for the opposite reason. Detached on Windows
+ * means the child gets a console of its own, and a console of its own is a black window that appears
+ * on the owner's screen and stays there for as long as Garden runs. The launcher starts both halves
+ * with `-WindowStyle Hidden` for exactly that reason; a restart that does not match it hands him a
+ * window he never had before and cannot close without stopping the server. He put it plainly:
+ * "the listeners keep popping up on my screen as well. i dont watn it to do that".
+ */
+const child = spawn(exec, args, { cwd, detached: true, stdio: 'ignore', windowsHide: true, env: process.env })
 child.unref()
 
 /*
@@ -128,7 +161,7 @@ async function replacePageHalf() {
           windowsHide: true,
           env: process.env,
         })
-      : spawn('npm', ['run', 'dev:web'], { cwd, detached: true, stdio: 'ignore', env: process.env })
+      : spawn('npm', ['run', 'dev:web'], { cwd, detached: true, stdio: 'ignore', windowsHide: true, env: process.env })
   web.unref()
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "garden",
-  "version": "1.1.13",
+  "version": "1.1.18",
   "private": true,
   "description": "A node-graph control room for AI CLI sessions",
   "workspaces": [

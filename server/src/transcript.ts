@@ -88,7 +88,7 @@ export function lastSeam(window: string): number {
  * Generous by a wide margin. A turn is rarely more than a few kilobytes once tool results are
  * dropped, so four megabytes is dozens of turns even for a session that pastes whole files around.
  */
-const TAIL_BYTES = 4 * 1024 * 1024
+export const TAIL_BYTES = 4 * 1024 * 1024
 
 /**
  * The last stretch of a JSONL file, as whole lines.
@@ -103,8 +103,14 @@ const TAIL_BYTES = 4 * 1024 * 1024
  *
  * The first line of the window is dropped when the window does not start at the beginning of the
  * file, because a byte offset lands mid-record and half a JSON object is not a record.
+ *
+ * Exported because `Ingest.readUsage` needs exactly this and did not have it. It kept the original
+ * `readFileSync` over the whole file, which Node refuses past 512MB: on a 681MB transcript every
+ * refresh threw into a catch written for a missing file, so that card's model never moved off the
+ * one it announced at startup. Two readers of the same file cannot each decide how much of it to
+ * read.
  */
-function tailLines(path: string, bytes: number): string[] {
+export function tailLines(path: string, bytes: number): string[] {
   const size = statSync(path).size
   if (size <= bytes) return readFileSync(path, 'utf8').split('\n').filter(Boolean)
 
@@ -128,7 +134,7 @@ function tailLines(path: string, bytes: number): string[] {
  * record and gave ten turns where a chattier one gave sixty. It stops growing at this, and the card
  * shows what was found rather than reading a hundred megabytes to fill a quota.
  */
-const MAX_TAIL_BYTES = 32 * 1024 * 1024
+export const MAX_TAIL_BYTES = 32 * 1024 * 1024
 
 /** One side of a conversation, as a card shows it. */
 export interface ChatTurn {

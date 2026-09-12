@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { readChat } from './transcript.js'
+import { MAX_TAIL_BYTES, TAIL_BYTES, readChat, tailLines } from './transcript.js'
 import type {
   AgentEvent,
   ServerMessage,
@@ -824,14 +824,46 @@ export class Ingest {
     }
   }
 
+  /**
+   * The tail of the transcript, growing the window until something is found in it.
+   *
+   * This read the whole file into a string, which Node refuses past 512MB. The owner had a card
+   * whose transcript was 681MB, so every refresh threw `ERR_STRING_TOO_LONG` into the catch below,
+   * written for a file that is missing rather than one that is enormous. That card's gauge stayed
+   * blank and, worse, its model never moved off the one announced at `SessionStart`: he read it in
+   * the rail as an orchestrator "on fable low and its showing previous setting of opus". The
+   * failure lands on exactly the cards that have been working longest, and it is silent.
+   *
+   * `readChat` beside this had already been changed to read the tail for the same reason. The fix
+   * was not carried across, which is the argument for the reader being one exported function rather
+   * than each caller deciding how much of the file it wants.
+   *
+   * The window grows because how many turns fit in four megabytes depends on the session, and a
+   * card whose records are hundreds of kilobytes each can have no usage line in the first window.
+   * It stops at the same ceiling the chat reader stops at.
+   */
   private readUsage(sessionId: string) {
     const session = this.store.getSession(sessionId)
     if (!session) return
     const path = this.transcriptFor(session)
     if (!path) return
+    let size = 0
     try {
-      const raw = readFileSync(path, 'utf8')
-      const lines = raw.split('\n')
+      size = statSync(path).size
+    } catch {
+      return
+    }
+    for (let window = TAIL_BYTES; ; window *= 4) {
+      if (this.scanUsage(session, path, window)) return
+      if (window >= size || window >= MAX_TAIL_BYTES) return
+    }
+  }
+
+  /** One pass over one window. True when it found the record it was looking for. */
+  private scanUsage(session: TerminalSession, path: string, window: number): boolean {
+    const sessionId = session.id
+    try {
+      const lines = tailLines(path, window)
       for (let i = lines.length - 1; i >= 0 && i > lines.length - 400; i--) {
         const line = lines[i]
         if (!line) continue
@@ -861,7 +893,7 @@ export class Ingest {
                 contextSource: 'transcript',
               })
             }
-            return
+            return true
           }
           continue
         }
@@ -889,10 +921,16 @@ export class Ingest {
           contextSource: 'transcript',
           model: model ?? session.model,
         })
-        return
+        return true
       }
     } catch {
-      // An unreadable transcript leaves the gauge blank rather than showing a stale number.
+      /*
+       * An unreadable transcript leaves the gauge blank rather than showing a stale number. It says
+       * false rather than true, so a window that could not be read is retried at the next size
+       * instead of being taken for a window with nothing in it.
+       */
+      return false
     }
+    return false
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@garden/web",
-  "version": "1.1.13",
+  "version": "1.1.18",
   "private": true,
   "type": "module",
   "scripts": {

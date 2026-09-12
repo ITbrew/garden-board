@@ -15,6 +15,7 @@ import type {
   WorkRecord,
   SavedLayout,
   BoardLimits,
+  CardLoop,
   TaskContract,
   TaskReassignment,
   TaskState,
@@ -237,6 +238,20 @@ export class Store {
       --
       -- Absent means nothing has been set and the default applies, so an existing project keeps
       -- working without a migration writing a number nobody chose.
+      -- A prompt typed into one card every N minutes while the loop is on. See CardLoop in shared.
+      CREATE TABLE IF NOT EXISTS loops (
+        id TEXT PRIMARY KEY,
+        projectId TEXT NOT NULL,
+        sessionId TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        minutes INTEGER NOT NULL,
+        enabled INTEGER NOT NULL,
+        lastFiredAt INTEGER,
+        lastOutcome TEXT,
+        runs INTEGER NOT NULL DEFAULT 0,
+        createdAt INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS limits (
         projectId TEXT PRIMARY KEY,
         running INTEGER NOT NULL,
@@ -467,6 +482,11 @@ export class Store {
          * its writes earned it and gains nothing it cannot prove.
          */
         tasksCompleted: "TEXT NOT NULL DEFAULT '[]'",
+      },
+      loops: {
+        // A board whose loops table predates the count comes back at zero rather than at null, so
+        // the panel never has to decide what a missing count means.
+        runs: 'INTEGER NOT NULL DEFAULT 0',
       },
       limits: {
         /*
@@ -814,6 +834,60 @@ export class Store {
   findSessionByAgentId(agentId: string): TerminalSession | undefined {
     const row = this.db.prepare('SELECT * FROM sessions WHERE agentId = ?').get(agentId) as any
     return row ? hydrateSession(row) : undefined
+  }
+
+  // --- loops ---
+
+  listLoops(projectId?: string): CardLoop[] {
+    const rows = (projectId
+      ? this.db.prepare('SELECT * FROM loops WHERE projectId = ? ORDER BY createdAt').all(projectId)
+      : this.db.prepare('SELECT * FROM loops ORDER BY createdAt').all()) as any[]
+    return rows.map((r) => ({
+      id: r.id,
+      projectId: r.projectId,
+      sessionId: r.sessionId,
+      prompt: r.prompt,
+      minutes: r.minutes,
+      enabled: !!r.enabled,
+      lastFiredAt: r.lastFiredAt ?? null,
+      lastOutcome: r.lastOutcome ?? null,
+      runs: r.runs ?? 0,
+      createdAt: r.createdAt,
+    }))
+  }
+
+  getLoop(id: string): CardLoop | undefined {
+    return this.listLoops().find((l) => l.id === id)
+  }
+
+  setLoop(loop: CardLoop) {
+    this.db.prepare(`
+      INSERT INTO loops (id, projectId, sessionId, prompt, minutes, enabled, lastFiredAt, lastOutcome, runs, createdAt)
+      VALUES (@id, @projectId, @sessionId, @prompt, @minutes, @enabled, @lastFiredAt, @lastOutcome, @runs, @createdAt)
+      ON CONFLICT(id) DO UPDATE SET
+        sessionId=@sessionId, prompt=@prompt, minutes=@minutes, enabled=@enabled,
+        lastFiredAt=@lastFiredAt, lastOutcome=@lastOutcome
+    `).run({ ...loop, enabled: loop.enabled ? 1 : 0, runs: loop.runs ?? 0 })
+  }
+
+  /*
+   * The run count moves with `lastFiredAt` and never on its own, because they record the same event:
+   * the prompt actually going into the card. A loop held because its card was working records the
+   * reason and nothing else, so the count stays a count of prompts typed rather than of times the
+   * clock came round. `setLoop` above deliberately does not carry it into the UPDATE, so editing a
+   * loop's prompt or interval cannot reset the history of it.
+   */
+  markLoop(id: string, lastFiredAt: number | null, lastOutcome: string) {
+    if (lastFiredAt === null) {
+      this.db.prepare('UPDATE loops SET lastOutcome = ? WHERE id = ?').run(lastOutcome, id)
+    } else {
+      this.db.prepare('UPDATE loops SET lastFiredAt = ?, lastOutcome = ?, runs = runs + 1 WHERE id = ?')
+        .run(lastFiredAt, lastOutcome, id)
+    }
+  }
+
+  deleteLoop(id: string) {
+    this.db.prepare('DELETE FROM loops WHERE id = ?').run(id)
   }
 
   // --- limits ---

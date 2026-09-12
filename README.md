@@ -6,7 +6,9 @@ Every agent you run is a card on a board. Cards are wired to each other, and the
 decoration: a wire is what permits one card to send anything to another, and a card's role is
 enforced by the CLI's own permission layer rather than by Garden asking nicely.
 
-`DEVELOPMENT.md` is the architecture. This file is how to run it and how to use it.
+`DEVELOPMENT.md` is the architecture. `OPERATING.md` is the manual for working the board: making a
+card, changing one, wiring two together, what each role is refused, and what a session is equipped
+with. This file is how to run it.
 
 ---
 
@@ -235,3 +237,15 @@ looking at an overlap, and both were true, because a web's frame is drawn and is
   through its parent.
 - Most of the older scripts in `scripts/` still connect to port 5178 rather than starting their own
   instance. Migrate one before you run it against a board you care about.
+
+---
+
+## Licence
+
+MIT, in `LICENSE` at the root. Copy it, change it, ship it, sublicense it as part of something else.
+The only condition is that the copyright notice travels with it.
+
+It is here because the absence of one is not neutral. A repository with no licence file is all rights
+reserved by default, and a reader acting carefully, a person or an agent, correctly refuses to reuse
+anything in it. Nothing about this project was meant to be closed, so the file says so in the one
+place a reader will look.

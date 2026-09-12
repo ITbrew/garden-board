@@ -222,6 +222,110 @@ check('the yes or no control is the same box as the numbers beside it',
     ? `choice ${column.choice.w}px at ${column.choice.left}, inputs ${column.inputs.map((i) => `${i.w}px at ${i.left}`).join(', ')}`
     : 'nothing to measure')
 
+/*
+ * A loop's prompt is read rather than glanced at, so its box has to hold one.
+ *
+ * It shipped two lines tall and the owner found it immediately: "its a little bit crammed as a
+ * feature on the bar in the text section, needs more vertical space". The prompt below is the length
+ * of a real check-in, and the assertion is that the box shows all of it without scrolling, which is
+ * the thing being complained about rather than a number of pixels.
+ */
+const loopPrompt =
+  'Check in: read your inbox and your notes, do the next step of your open work, and stop at its end. Turn this loop off when the work is finished.'
+board.ws.send(
+  JSON.stringify({
+    t: 'loop.set',
+    projectId: board.project.id,
+    loop: { sessionId: asleep.id, prompt: loopPrompt, minutes: 15, enabled: true },
+  }),
+)
+await sleep(800)
+await page.reload({ waitUntil: 'networkidle2' })
+await sleep(2000)
+
+const loopBox = await page.evaluate(() => {
+  const el = document.querySelector('.rail-loop__prompt')
+  if (!el) return null
+  return { height: Math.round(el.clientHeight), content: Math.round(el.scrollHeight), text: el.value.length }
+})
+check('a loop prompt is on screen', !!loopBox && loopBox.text > 0, loopBox ? `${loopBox.text} chars` : 'no textarea')
+check('and its box shows the whole prompt without scrolling',
+  !!loopBox && loopBox.content <= loopBox.height,
+  loopBox ? `box ${loopBox.height}px, prompt needs ${loopBox.content}px` : 'nothing to measure')
+
+/*
+ * The three controls, in the order the owner drew them: "put them all in line [start][stop][delete]".
+ * Read off the rendered page rather than from the source, so it is what he would see.
+ */
+const buttons = await page.evaluate(() => {
+  const row = document.querySelector('.rail-loop__buttons')
+  if (!row) return null
+  const btns = [...row.querySelectorAll('button')].map((b) => ({
+    label: b.textContent.trim(),
+    top: Math.round(b.getBoundingClientRect().top),
+    left: Math.round(b.getBoundingClientRect().left),
+    disabled: b.disabled,
+  }))
+  const runs = document.querySelector('.rail-loop__runs')?.textContent.trim() ?? null
+  const state = document.querySelector('.rail-loop__state')?.textContent.trim() ?? null
+  return { btns, runs, state }
+})
+check('the loop has three buttons', buttons?.btns.length === 3, buttons ? buttons.btns.map((b) => b.label).join('') : 'no row')
+check(
+  'they read Start, Stop, Delete, left to right',
+  buttons?.btns.map((b) => b.label).join(',') === 'Start,Stop,Delete' &&
+    buttons.btns[0].left < buttons.btns[1].left &&
+    buttons.btns[1].left < buttons.btns[2].left,
+  buttons ? buttons.btns.map((b) => `${b.label}@${b.left}`).join(' ') : '',
+)
+check(
+  'and they are on one line',
+  !!buttons && new Set(buttons.btns.map((b) => b.top)).size === 1,
+  buttons ? buttons.btns.map((b) => b.top).join(',') : '',
+)
+// The loop above is running, so Start is the one that can do nothing and says so by being disabled.
+check('the button matching the state is disabled', buttons?.btns[0].disabled === true && buttons?.btns[1].disabled === false,
+  buttons ? `Start ${buttons.btns[0].disabled}, Stop ${buttons.btns[1].disabled}` : '')
+check('the state is a chip above them', buttons?.state === 'running', String(buttons?.state))
+check('and the run count is on screen', /^\d+ runs?$/.test(buttons?.runs ?? ''), String(buttons?.runs))
+
+/*
+ * Both folds, and that they are remembered.
+ *
+ * The owner asked for them together: "make each loop collapsible as well on the loops side bar as
+ * entire section as well." A rail with a loop on every card is otherwise something to scroll past.
+ * The reload at the end is the half that would quietly not work: folding something that comes back
+ * open on the next refresh is the same complaint the terminal panes produced.
+ */
+const press = (sel) => page.evaluate((s) => {
+  const b = document.querySelector(s)
+  if (!b) return false
+  b.click()
+  return true
+}, sel)
+const shown = (sel) => page.evaluate((s) => !!document.querySelector(s), sel)
+
+check('the loop is open to begin with', await shown('.rail-loop__prompt'))
+check('its fold control is there', await press('.rail-loop__fold'))
+await sleep(400)
+check('folding a loop hides its prompt and buttons',
+  !(await shown('.rail-loop__prompt')) && !(await shown('.rail-loop__buttons')))
+check('and the folded loop still names its card', await shown('.rail-loop__card'))
+
+check('the section has a fold control', await press('.rail-title--fold .twisty'))
+await sleep(400)
+check('folding the section hides every loop', !(await shown('.rail-loop')))
+const count = await page.evaluate(() => document.querySelector('.rail-title__count')?.textContent?.trim() ?? null)
+check('and the shut section still says how many are running', count === '1/1', String(count))
+
+await page.reload({ waitUntil: 'networkidle2' })
+await sleep(2000)
+check('the fold survived a reload', !(await shown('.rail-loop')) && (await shown('.rail-title--fold')))
+check('and opening it again brings the loop back folded as it was left', await press('.rail-title--fold .twisty'))
+await sleep(500)
+check('the loop is there', await shown('.rail-loop'))
+check('and it is still folded', !(await shown('.rail-loop__prompt')))
+
 check('no page errors', pageErrors.length === 0, pageErrors[0] ?? '')
 
 await browser.close()

@@ -346,6 +346,21 @@ that asked, so attempts are visible rather than merely blocked.
 The reason this exists: one request produced thirty-eight cards with twenty sessions running, and no
 card had misbehaved. Each hired what its brief allowed. The total was nobody's decision.
 
+## Loops: a prompt typed into a card every N minutes, switched from the rail
+
+Owner, 2026-09-11: *"create loop section in the ceiling menus that allows me to toggle loops on/off
+and select frequency of checking in minutes."* Before this the only loop on the board was a timer
+inside the orchestrator's own session, which the board could neither see nor stop.
+
+A loop is one row in the `loops` table: card, prompt, minutes, on or off (`CardLoop` in shared).
+The rail's Loops section, under Ceiling, is where the owner sets all four; `garden-loop.mjs` sets
+the same four from a terminal. The server checks every twenty seconds and types the prompt, then
+Enter, into the card only when its status is `idle`; a card that is working, waiting, stopped or
+closed is left alone and the loop's `lastOutcome` says `held: card working` and so on, so a loop
+that is not firing never reads as silence. Switching a loop on starts its clock, so "every 15
+minutes" means the first one in 15 minutes. Nothing about a loop is inferred: what shows on the
+row is the server's own record of the last time the loop was due.
+
 ## What is NOT built
 - The worker cycle: write the notes, check the record exists, then clear the context. The gate is
   designed in the plan and not built.
@@ -418,6 +433,7 @@ node scripts/test-pipeline.mjs         what a run reached, and what it refuses t
 node scripts/test-conpty-reflow.mjs    a resize does not put screens in the stream nobody sent
 node scripts/test-replay-across-resize.mjs  a buffer spanning two widths replays as one screen
 node scripts/test-restarted-card-knows-its-size.mjs  a restarted card is told its pane size again
+node scripts/test-restart-helper-kills-a-hung-server.mjs  a backend that will not leave is ended and replaced
 node scripts/test-card-roots-are-its-own.mjs  a card gets its own roots and its role's, not everyone's
 node scripts/test-roots-open-as-columns.mjs  the roots dot opens columns, and a column opens its files
 node scripts/test-card-conversation-view.mjs  every card can show its conversation, and it sticks

@@ -35,11 +35,20 @@ const BUDGET = 9200
  * them because a cut peers list fails invisibly, where a cut powers list fails at the moment the
  * card tries something and is refused.
  *
- * So the writing budget for the two instruction files is the reserve minus what peers needs. 3000
- * for instructions and 3200 for peers is the split, taken from the largest PEERS.md on the board.
+ * So the writing budget for the two instruction files is the reserve minus what peers needs. The
+ * split is a convention here rather than a number the hook knows: the hook serves ALL.md, the role
+ * file and PEERS.md from the 6200 in that order, and this script is what decides how much of it the
+ * instructions may fairly take.
+ *
+ * It was 3000 for instructions and 3200 for peers, taken from the largest PEERS.md on the board.
+ * Moved to 3400 on 2026-09-11 to pay for the to-do rules, which every card needs at startup rather
+ * than on demand: a card that does not know the list exists will not go and look for it. What that
+ * costs is real and is the reason it is written down here: 400 characters that a long PEERS.md can
+ * no longer count on, on a board where 93 of them are already past their allowance and being shared
+ * down. If wires start going unseen, this number is the first thing to look at.
  */
 const RESERVE = 6200
-const INSTRUCTIONS = 3000
+const INSTRUCTIONS = 3400
 const PEERS_ALLOWANCE = RESERVE - INSTRUCTIONS
 
 const size = (p) => {

@@ -18,6 +18,10 @@ import '@xyflow/react/dist/style.css'
 import {
   actions,
   contextColumnsOpen,
+  getDocContent,
+  getLoops,
+  onDocChange,
+  onLoops,
   getContextList,
   getHistoryGroups,
   getPipelineAt,
@@ -33,12 +37,14 @@ import { ColumnHeader, type ColumnHeaderData } from './ColumnHeader'
 import { WireEdge } from './WireEdge'
 import { WebFrame, type WebFrameData } from './WebFrame'
 import { PipelineNode, type PipelineNodeData } from './PipelineNode'
+import { TodoBar, type TodoBarData } from './TodoBar'
+import { loopPromptFor, parseTodo, progressOf, setDone, type TodoItem } from '../todo'
 import { RefusalPill, type RefusalPillData } from './RefusalPill'
 import { onTasks, refusalsForCard } from '../tasks'
 import { NewCardForm, type NewCardRequest } from './NewCardForm'
 import { NewDocForm, type NewDocRequest } from './NewDocForm'
 import { COLLAPSED_H, packCards, shouldAutoPack } from '../layout'
-import { BOARD, FRAME_HEADROOM, drawnOnBoard } from '@garden/shared'
+import { BOARD, FRAME_HEADROOM, cardIsOff, drawnOnBoard } from '@garden/shared'
 import { FirstRun } from './FirstRun'
 import { markFirstRun } from '../firstrun'
 
@@ -107,6 +113,7 @@ const nodeTypes = {
   doc: DocNode,
   channel: ChannelNode,
   columnHeader: ColumnHeader,
+  todoBar: TodoBar,
   webFrame: WebFrame,
   pipeline: PipelineNode,
   refusalPill: RefusalPill,
@@ -975,6 +982,109 @@ function CanvasInner() {
    * relationship drawn the same way rather than a new idea; it leaves the card's bottom port, which
    * is the port that means "what this session runs from".
    */
+  /*
+   * The to-do bars, one above the To Do card and one above every card with items of its own.
+   *
+   * Everything here is derived from `TODO.md`: the file is the list, and a card's personal list is
+   * the subset of it addressed to that card, worked out each time this runs. Nothing is stored, so
+   * there is no second copy to disagree with the file. Canon 26.
+   *
+   * Positions come from `computed` rather than from the card rows, because packing moves cards and
+   * a bar placed from the stored x would sit where the card used to be.
+   */
+  const [docTick, setDocTick] = useState(0)
+  useEffect(() => onDocChange(() => setDocTick((n) => n + 1)), [])
+  const [loopTick, setLoopTick] = useState(0)
+  useEffect(() => onLoops(() => setLoopTick((n) => n + 1)), [])
+
+  const todoCard = useMemo(
+    () => visDocs.find((d) => d.kind !== 'image' && /(^|[\/])todo\.md$/i.test(d.relPath)) ?? null,
+    [visDocs],
+  )
+  /*
+   * Asked for once, rather than only when the card is expanded the way a document card asks.
+   *
+   * The bars are the reason: they are drawn above cards anywhere on the board, including while the
+   * To Do card itself is collapsed or off screen, so the text has to arrive without anybody opening
+   * it. The doc poll pushes the file again whenever it changes on disk, which is what makes a card
+   * ticking its own item show up on every other card's bar.
+   */
+  useEffect(() => {
+    if (todoCard && getDocContent(todoCard.id) === undefined) actions.readDoc(todoCard.id)
+  }, [todoCard, docTick])
+
+  const todoBars: Node[] = useMemo(() => {
+    if (!todoCard) return []
+    const text = getDocContent(todoCard.id)
+    if (text === undefined) return []
+    const items = parseTodo(text, visSessions.map((s) => ({ id: s.id, title: s.title })))
+
+    const at = new Map(
+      computed.map((n) => [n.id, { x: n.position.x, y: n.position.y, width: (n.data as { width?: number }).width ?? 260 }]),
+    )
+    const toggle = (line: number, done: boolean) => actions.saveDoc(todoCard.id, setDone(text, line, !done))
+    const loops = getLoops(activeProjectId) ?? []
+    const out: Node[] = []
+    // Above the card, by the same gap the context web's column headers use, so the two families of
+    // derived labels sit at the same distance from what they describe.
+    const bar = (id: string, ownerId: string, data: Omit<TodoBarData, 'width'>) => {
+      const p = at.get(ownerId)
+      if (!p) return
+      out.push({
+        id,
+        type: 'todoBar',
+        position: { x: p.x, y: p.y - 34 },
+        draggable: false,
+        selectable: false,
+        data: { ...data, width: p.width } satisfies TodoBarData,
+      })
+    }
+
+    // The main list, on the To Do card, which carries the project's progress rather than any card's.
+    const whole = progressOf(items)
+    bar('todobar:main', todoCard.id, {
+      ...whole,
+      onToggle: (l) => toggle(l, !!items.find((i) => i.line === l)?.done),
+      main: true,
+    })
+
+    const byCard = new Map<string, TodoItem[]>()
+    for (const i of items) {
+      if (!i.cardId) continue
+      const list = byCard.get(i.cardId)
+      if (list) list.push(i)
+      else byCard.set(i.cardId, [i])
+    }
+    for (const [cardId, list] of byCard) {
+      const p = progressOf(list)
+      const has = loops.some((l) => l.sessionId === cardId)
+      const card = visSessions.find((s) => s.id === cardId)
+      bar(`todobar:${cardId}`, cardId, {
+        ...p,
+        onToggle: (l) => toggle(l, !!list.find((i) => i.line === l)?.done),
+        looping: has,
+        /*
+         * Only offered when there is no loop yet, and it makes an ordinary loop row: it shows up in
+         * the rail's Loops section like any other and is stopped, edited or deleted there. The owner
+         * asked for both halves: "each card should loop to their to-do list and set to off when
+         * completed", "with loop populating to loops list".
+         */
+        onLoop:
+          has || !card || !activeProjectId
+            ? undefined
+            : () =>
+                actions.setLoop(activeProjectId, {
+                  sessionId: cardId,
+                  prompt: loopPromptFor(card.title),
+                  minutes: 15,
+                  enabled: true,
+                }),
+      })
+    }
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [todoCard, computed, visSessions, activeProjectId, docTick, loopTick])
+
   const columnEdges: Edge[] = useMemo(
     () =>
       headers
@@ -1016,7 +1126,7 @@ function CanvasInner() {
     setNodes((prev) => {
       const byId = new Map(prev.map((n) => [n.id, n]))
       // Frames first, so a boundary is painted before the cards that sit inside it.
-      const withHeaders = [...frames, ...computed, ...headers, ...panels, ...channelNodes]
+      const withHeaders = [...frames, ...computed, ...headers, ...todoBars, ...panels, ...channelNodes]
       return withHeaders.map((n) => {
         const existing = byId.get(n.id)
         if (!existing) return n
@@ -1062,7 +1172,7 @@ function CanvasInner() {
         return { ...n, selected: existing.selected }
       })
     })
-  }, [computed, headers, frames, panels, channelNodes, setNodes, auto])
+  }, [computed, headers, todoBars, frames, panels, channelNodes, setNodes, auto])
 
   /*
    * Report packed positions back to the server.
@@ -1449,6 +1559,23 @@ function CanvasInner() {
           },
           { separator: true },
           {
+            /*
+             * The project's to-do list, at a fixed path rather than through the name form, because
+             * there is one of them and everything else in the feature looks for it by that name.
+             * Seeded with a line addressed to nobody, so the card is not an empty box: the shape of
+             * an item is the thing a person needs to see once.
+             */
+            label: 'Create To Do Card',
+            hint: 'TODO.md',
+            disabled: !pid || todoCard !== null,
+            onSelect: () => {
+              if (!pid) return
+              const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+              actions.createDoc(pid, 'TODO.md', at.x, at.y, true)
+              markPendingCreate(pid)
+            },
+          },
+          {
             label: 'New markdown file',
             hint: '.md',
             disabled: !pid,
@@ -1519,9 +1646,14 @@ function CanvasInner() {
       const doc = visDocs.find((d) => d.id === node.id)
       const name = session?.title ?? doc?.title ?? 'this card'
       const isCollapsed = session?.collapsed ?? doc?.collapsed ?? false
-      const off =
-        session != null &&
-        (session.status === 'stopped' || session.status === 'failed' || session.status === 'done')
+      /*
+       * The same question the server asks, asked with the same function.
+       *
+       * These were two lists of statuses that happened to match, until they did not: a card whose
+       * shell outlived its CLI read as off here, offered Turn on, and was refused there as already
+       * running. Canon 03, "When the shell outlives the agent".
+       */
+      const off = session != null && cardIsOff(session)
 
       const items: MenuItem[] = []
 

@@ -10,6 +10,7 @@ import {
   DEFAULT_PORT,
   FRAME_HEADROOM,
   WS_PATH,
+  cardIsOff,
   drawnOnBoard,
   subagentsAllowedFor,
   type AgentEvent,
@@ -1287,7 +1288,8 @@ const GUEST_READS = new Set<string>([
  * could open one and be him. The card connection now meets the same `ROLE_POWERS` check its HTTP
  * twin applies, and a connection that is neither the owner nor a card reads and changes nothing.
  */
-function socketMaySend(ws: WebSocket, t: string): { ok: true } | { ok: false; reason: string } {
+function socketMaySend(ws: WebSocket, msg: ClientMessage): { ok: true } | { ok: false; reason: string } {
+  const t = msg.t
   const id = identityOf(ws)
   if (id.kind === 'owner') return { ok: true }
   if (id.kind === 'guest') {
@@ -1336,6 +1338,36 @@ function socketMaySend(ws: WebSocket, t: string): { ok: true } | { ok: false; re
         'typing into another card is the control plane, and this card does not have it. Send mail ' +
         'along a wire instead: the card reads it when it chooses to, which is the difference between ' +
         'a hand-off and taking somebody over mid-turn.',
+    }
+  }
+
+  /*
+   * A loop is the same power as the line above it, spread over time.
+   *
+   * "Type this into that card every fifteen minutes" is typing into that card, so it is held to the
+   * same test rather than left beside it. What is deliberately allowed is a card changing its OWN
+   * loop, which is what the owner asked these for: "i want orhcestrator to be able to turn loops off
+   * if ledger is completed". A loop whose prompt ends by telling the card to stop when the work is
+   * done is useless if the card cannot stop it.
+   *
+   * Every card could change every loop on the board until now. The loop messages were added after
+   * this door was written and fell through its closing `return { ok: true }`, which is the same
+   * failure the guest allowlist above avoids by being an allowlist. Canon 25.
+   */
+  if (t === 'loop.set' || t === 'loop.delete') {
+    const asked = msg as { loop?: { sessionId?: string }; id?: string }
+    const target =
+      t === 'loop.set'
+        ? asked.loop?.sessionId ?? null
+        : store.getLoop(String(asked.id ?? ''))?.sessionId ?? null
+    if (target === card.id) return { ok: true }
+    if (powers.creates) return { ok: true }
+    return {
+      ok: false,
+      reason:
+        'a loop types into a card every few minutes, so changing the loop on another card is the control ' +
+        'plane and this card does not have it. Its own loop it may change, including switching it ' +
+        'off. For anything else, send mail along a wire.',
     }
   }
 
@@ -3570,6 +3602,16 @@ function startSession(s: TerminalSession): TerminalSession {
      */
     GARDEN_SEND: sendShimPath(),
     /*
+     * The folder every one of those commands lives in.
+     *
+     * Each shim above names one file, which is fine for the three a card uses constantly and wrong
+     * for the rest: a card told to switch its own loop off had nowhere to learn where
+     * `garden-loop.mjs` is, and the shared roots cannot hardcode a checkout path because they are
+     * shared across boards and machines. One variable answers it for every command Garden ships,
+     * including ones added after this line.
+     */
+    GARDEN_BIN: dirname(sendShimPath()),
+    /*
      * How this session asks for a card to exist. See hireShimPath: every card gets it, because for
      * most of them the verb is "ask" rather than "create".
      */
@@ -3934,7 +3976,7 @@ function handle(ws: WebSocket, msg: ClientMessage) {
    * about a hundred message types here and the ones that matter were added over months; a rule that
    * has to be remembered at each new case is a rule that holds until somebody is in a hurry.
    */
-  const may = socketMaySend(ws, msg.t)
+  const may = socketMaySend(ws, msg)
   if (!may.ok) {
     /*
      * A refusal at this door is recorded the way its HTTP twin is.
@@ -4032,15 +4074,38 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       } catch (err) {
         return fail(ws, (err as Error).message, msg.t)
       }
-      if (existsSync(abs)) return fail(ws, 'a file with that name already exists', msg.t)
       const name = msg.relPath.split('/').pop() ?? msg.relPath
-      try {
-        mkdirSync(dirname(abs), { recursive: true })
-        writeFileSync(abs, msg.relPath.endsWith('.md') ? `# ${name.replace(/\.md$/, '')}
+      /*
+       * A file that is already there is a refusal for "New markdown file" and not for the To Do
+       * card, which is why the caller says which it is.
+       *
+       * The two are different asks wearing the same message. Naming a new note over an existing file
+       * is a mistake worth stopping. Asking for the project's to-do list is asking for the one that
+       * exists, and a project that already has a TODO.md, which is most of the ones this was built
+       * for, would otherwise be told it cannot have a To Do card.
+       */
+      if (existsSync(abs)) {
+        if (!msg.openIfExists) return fail(ws, 'a file with that name already exists', msg.t)
+        const already = store.findDoc(project.id, msg.relPath)
+        if (already) {
+          broadcast({ t: 'doc.updated', card: already })
+          return
+        }
+      } else {
+        try {
+          mkdirSync(dirname(abs), { recursive: true })
+          writeFileSync(
+            abs,
+            msg.relPath.endsWith('.md')
+              ? `# ${name.replace(/\.md$/, '')}
 
-` : '', 'utf8')
-      } catch (err) {
-        return fail(ws, `could not create the file: ${(err as Error).message}`, msg.t)
+`
+              : '',
+            'utf8',
+          )
+        } catch (err) {
+          return fail(ws, `could not create the file: ${(err as Error).message}`, msg.t)
+        }
       }
       /*
        * Where he was pointing, then nudged clear of anything already there.
@@ -5269,6 +5334,12 @@ function handle(ws: WebSocket, msg: ClientMessage) {
             '--cwd', process.cwd(),
             '--exec', process.execPath,
             /*
+             * Which process to end by force if it will not end itself. The helper waits on the port
+             * first and reaches for this only when that wait runs out. See `shutdown` for the day
+             * this was needed.
+             */
+            '--pid', String(process.pid),
+            /*
              * The page half goes too, and only when the launcher said which one is ours.
              *
              * Restarting the backend alone left the owner on the previous build with `builds differ`
@@ -6267,6 +6338,66 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       return send(ws, { t: 'session.token', sessionId: msg.sessionId, token: tokenFor(card.id) })
     }
 
+    /*
+     * Loops: a prompt typed into one card every N minutes. The owner asked for the on/off switch
+     * and the minutes to live on the board, so this is the only place either is set; the loop
+     * itself runs in `loopTick` below and never types into a card that is not idle.
+     */
+    case 'loop.list': {
+      const project = store.getProject(msg.projectId)
+      if (!project) return fail(ws, 'unknown project', msg.t)
+      return send(ws, { t: 'loops', projectId: project.id, loops: store.listLoops(project.id) })
+    }
+    case 'loop.set': {
+      const project = store.getProject(msg.projectId)
+      if (!project) return fail(ws, 'unknown project', msg.t)
+      const l = msg.loop
+      const minutes = Number(l?.minutes)
+      if (!l || !Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+        return fail(ws, 'a loop runs every whole number of minutes between 1 and 1440', msg.t)
+      }
+      const target = store.getSession(l.sessionId)
+      if (!target || target.projectId !== project.id || target.closedAt !== null) {
+        return fail(ws, 'a loop needs an open card on this board to type into', msg.t)
+      }
+      const prompt = String(l.prompt ?? '').trim()
+      if (!prompt) return fail(ws, 'a loop needs the prompt it types', msg.t)
+      const existing = l.id ? store.getLoop(l.id) : undefined
+      if (l.id && !existing) return fail(ws, 'unknown loop', msg.t)
+      store.setLoop({
+        id: existing?.id ?? randomUUID(),
+        projectId: project.id,
+        sessionId: target.id,
+        prompt,
+        minutes,
+        enabled: !!l.enabled,
+        // Starting a loop makes it due at once rather than in N minutes, so the card is told what it
+        // is being asked to do the moment the loop exists. `loopTick` below still decides whether
+        // the prompt actually goes in: a card that is working holds it until it is idle.
+        //
+        // Only a change of state clears this. Editing the prompt or the interval of a running loop
+        // leaves its clock alone, so correcting a typo does not type into the card.
+        lastFiredAt: existing && existing.enabled === !!l.enabled ? existing.lastFiredAt : null,
+        lastOutcome: existing?.lastOutcome ?? null,
+        // Carried, not reset. `setLoop` writes it only on the insert, so editing an existing loop's
+        // prompt or interval leaves the count where it was: it is the history of the card being
+        // typed into, not of this particular wording.
+        runs: existing?.runs ?? 0,
+        createdAt: existing?.createdAt ?? Date.now(),
+      })
+      // Started, so do not wait up to twenty seconds for the next tick to notice.
+      if (l.enabled && !(existing && existing.enabled)) loopTick()
+      return broadcast({ t: 'loops', projectId: project.id, loops: store.listLoops(project.id) })
+    }
+    case 'loop.delete': {
+      const project = store.getProject(msg.projectId)
+      if (!project) return fail(ws, 'unknown project', msg.t)
+      const existing = store.getLoop(msg.id)
+      if (!existing || existing.projectId !== project.id) return fail(ws, 'unknown loop', msg.t)
+      store.deleteLoop(existing.id)
+      return broadcast({ t: 'loops', projectId: project.id, loops: store.listLoops(project.id) })
+    }
+
     case 'limits.get': {
       const project = store.getProject(msg.projectId)
       if (!project) return fail(ws, 'unknown project', msg.t)
@@ -6470,17 +6601,58 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       return
     }
 
+    /*
+     * Turn on, including for a card that already has a process but reads as off.
+     *
+     * A card is a shell with a CLI inside it, and the CLI can end while the shell stays up holding
+     * the pseudo-terminal. What is left is a card whose status says `done` and whose process is
+     * still in the live map. This used to return on the first line, silently, because that line was
+     * written for a double click on a running card and could not tell one from the other. The owner
+     * found it the only way it can be found: "i cant start that card back up after i stopped its
+     * session", with nothing in any log to say why.
+     *
+     * So a live process is a reason to do nothing only while the card is actually running. A card
+     * that reads as off gets the husk ended and a fresh process in its place, which is what pressing
+     * the button asked for. Canon 03, "When the shell outlives the agent".
+     */
     case 'session.start': {
       const s = store.getSession(msg.sessionId)
       if (!s) return fail(ws, 'unknown session', msg.t)
-      if (ptys.isLive(s.id)) return
-      try {
-        const started = startSession({ ...s, status: 'starting' })
-        broadcast({ t: 'session.updated', session: started })
-      } catch (err) {
-        fail(ws, `could not start: ${(err as Error).message}`, msg.t)
+      const begin = () => {
+        // Read again rather than trusting `s`: between the kill and here the owner can have closed
+        // the card, and a replacement started into a closed card is a process nothing draws.
+        const now = store.getSession(s.id)
+        if (!now || now.closedAt !== null) return
+        try {
+          broadcast({ t: 'session.updated', session: startSession({ ...now, status: 'starting' }) })
+        } catch (err) {
+          fail(ws, `could not start: ${(err as Error).message}`, msg.t)
+        }
       }
-      return
+      if (ptys.isLive(s.id)) {
+        if (!cardIsOff(s)) return
+        ptys.kill(s.id)
+        /*
+         * `spawn` refuses while the old entry is still in the map, and the map is cleared by the
+         * exit event rather than by asking for the kill, so the replacement waits for the process to
+         * actually go. Bounded, because a shell that will not die is a thing to say out loud rather
+         * than a poll that runs forever.
+         */
+        const until = Date.now() + 5000
+        const whenGone = () => {
+          if (!ptys.isLive(s.id)) return begin()
+          if (Date.now() >= until) {
+            return fail(
+              ws,
+              `"${s.title}" still has a process that will not end, so it cannot be started again yet`,
+              msg.t,
+            )
+          }
+          setTimeout(whenGone, 100).unref?.()
+        }
+        return whenGone()
+      }
+      return begin()
     }
 
     /**
@@ -6709,7 +6881,17 @@ ptys.on('data', (sessionId: string, data: string, seq: number) => {
   broadcast({ t: 'session.data', sessionId, data, seq })
 })
 
+/*
+ * True from the moment a shutdown begins. The exit handler below stays out of the database while
+ * this is set: the cards are being killed so the process can leave, and `revive` on the way back up
+ * reads their last status to decide which to bring back. Recording each one as stopped here would
+ * be truthful for a second and would cost every running card its return. The old synchronous exit
+ * got this right by accident, because the process was gone before any exit event could fire.
+ */
+let leaving = false
+
 ptys.on('exit', ({ sessionId, exitCode, intentional }) => {
+  if (leaving) return
   // Whatever it was holding, it is not working on it now. Released before anything else, so a card
   // that crashed cannot leave a file flagged against the next card that needs it.
   releaseClaims(sessionId)
@@ -6815,7 +6997,18 @@ const http = createServer((req, res) => {
         if (!mayCreate) {
           return answer(403, `only the orchestrator starts cards. Ask it, and it will answer along the wire.`)
         }
-        if (ptys.isLive(card.id)) return answer(200, `"${card.title}" is already running.`)
+        // A husk, a shell whose CLI has ended, is not "already running": it is the state the board
+        // draws as off. Same test as the socket's Turn on, and the same refusal to pretend.
+        if (ptys.isLive(card.id) && !cardIsOff(card)) {
+          return answer(200, `"${card.title}" is already running.`)
+        }
+        if (ptys.isLive(card.id)) {
+          return answer(
+            409,
+            `"${card.title}" has a process left over from a run that ended. Turn it on from the board, ` +
+              'which replaces it.',
+          )
+        }
         const refusal = overCeiling(project.id, null, true)
         if (refusal) {
           recordCeilingRefusal(from.id, null, card.title, refusal)
@@ -7733,6 +7926,85 @@ setInterval(() => {
 }, 1000).unref?.()
 
 /*
+ * Doc cards follow their file, so a file an agent regenerates stays current on the board without
+ * the Reload button. Owner 2026-09-11, for the ledger's TODO.md, rewritten every fifteen minutes.
+ *
+ * Same shape as the channel poll above and for the same reasons: a stat over a handful of cards,
+ * never fs.watch. The first pass only records what is there, so a restart does not re-send every
+ * open document; after that a changed mtime reads the file once and broadcasts it. A card being
+ * edited keeps its draft, because the renderer holds the draft apart from the content it was
+ * seeded from, and the save path already refuses to overwrite a newer file.
+ */
+/**
+ * The loops, checked every twenty seconds and once more the moment one is started.
+ *
+ * A loop is due when its minutes have passed since it last typed, and a loop that has never typed
+ * is due now. Due and the card idle: the prompt is typed and Enter follows, the same two-piece
+ * write every other automatic input uses. Due and the card anything else: nothing is typed, the
+ * outcome says why, and the loop stays due, so the prompt lands the moment the card next reads as
+ * idle rather than a full period later. The owner's rule, from the ledger loop this replaces: "if a
+ * card is working dont send them a wake up message."
+ *
+ * Starting a loop clears `lastFiredAt`, so Start means the card is told now what it is being asked
+ * to do every N minutes, rather than sitting in silence for the first period wondering. The owner:
+ * "make the start button send the message to the card for designated loop so it understands loop
+ * sequence and starts the loop." It was the other way round for one revision, on my reasoning that
+ * "every fifteen minutes" means the first one is in fifteen minutes. That reasoning is about the
+ * clock and his is about the card, and the card is the point.
+ */
+function loopTick() {
+  const now = Date.now()
+  const touched = new Set<string>()
+  for (const loop of store.listLoops()) {
+    if (!loop.enabled) continue
+    if (loop.lastFiredAt !== null && now - loop.lastFiredAt < loop.minutes * 60_000) continue
+    const s = store.getSession(loop.sessionId)
+    const held = !s ? 'held: card gone'
+      : s.closedAt !== null ? 'held: card closed'
+      : s.status !== 'idle' ? `held: card ${s.status}`
+      : null
+    if (held) {
+      if (loop.lastOutcome !== held) {
+        store.markLoop(loop.id, null, held)
+        touched.add(loop.projectId)
+      }
+      continue
+    }
+    if (!ptys.write(loop.sessionId, loop.prompt)) {
+      store.markLoop(loop.id, null, 'held: no process to type into')
+      touched.add(loop.projectId)
+      continue
+    }
+    writeLater(loop.sessionId, s!.generation, '\r')
+    store.markLoop(loop.id, now, 'typed')
+    touched.add(loop.projectId)
+  }
+  for (const projectId of touched) {
+    broadcast({ t: 'loops', projectId, loops: store.listLoops(projectId) })
+  }
+}
+setInterval(loopTick, 20_000).unref?.()
+
+const docSeen = new Map<string, number>()
+setInterval(() => {
+  for (const card of store.listDocs()) {
+    if (card.kind === 'image') continue
+    const project = store.getProject(card.projectId)
+    if (!project) continue
+    const at = mtimeOf(project.path, card.relPath, card.external)
+    const seen = docSeen.get(card.id)
+    docSeen.set(card.id, at)
+    if (seen === undefined || seen === at || at === 0) continue
+    try {
+      const content = card.external ? readExternalDoc(card.relPath) : readDoc(project.path, card.relPath)
+      broadcast({ t: 'doc.content', cardId: card.id, content, mtime: at })
+    } catch {
+      // Mid-write or gone. The next pass sees the settled file.
+    }
+  }
+}, 2000).unref?.()
+
+/*
  * Copy transcripts into Garden's own store before the CLI's thirty day retention deletes them.
  *
  * Every six hours, and cheap on repeat runs: it stats files and only reads one that is new or has
@@ -7948,9 +8220,33 @@ function revive() {
   setTimeout(next, 1500).unref?.()
 }
 
+/*
+ * Stop, and actually go.
+ *
+ * This used to be `killAll` followed by `process.exit(0)` on the same tick. On 2026-09-11 the owner
+ * pressed Restart server with one card running and the backend never left: the log ends at "restart
+ * asked for from the board", the port stayed open for hours, and nothing answered on it. Exiting
+ * while ConPTY is still tearing down the process just killed is a known way for node to stop in
+ * native cleanup, and a process stopped there still holds its listening socket, which is exactly
+ * what the restart helper was waiting to see close. The helper gave up after thirty seconds, and
+ * the board was a corpse with a live port, which is the worst of the available outcomes.
+ *
+ * So the exit now waits for the PTYs it killed to report their exit, bounded, and only then leaves.
+ * The bound is short because a card that has not exited in two seconds is not going to be helped by
+ * a third, and the helper on the other side force-kills this pid once its own wait runs out, which
+ * is the backstop for the case where even that is not enough.
+ */
 function shutdown() {
+  if (leaving) return
+  leaving = true
   ptys.killAll()
-  process.exit(0)
+  const startedAt = Date.now()
+  const poll = setInterval(() => {
+    if (ptys.liveCount() === 0 || Date.now() - startedAt > 2000) {
+      clearInterval(poll)
+      process.exit(0)
+    }
+  }, 50)
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)

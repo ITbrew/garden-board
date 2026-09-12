@@ -1042,7 +1042,7 @@ export type ClientMessage =
    * before this existed, so every file card was made at 0,0 and, on any board where a single card
    * had ever been dragged, auto-packing was off and they piled up on top of each other there.
    */
-  | { t: 'doc.create'; projectId: string; relPath: string; x?: number; y?: number }
+  | { t: 'doc.create'; projectId: string; relPath: string; x?: number; y?: number; openIfExists?: boolean }
   /** A message card, drawn empty. It binds to a card when a wire is drawn between the two. */
   | { t: 'channel.create'; projectId: string; x?: number; y?: number }
   /**
@@ -1219,6 +1219,14 @@ export type ClientMessage =
    * Cards that exist keep existing and the next create is refused. A limit that silently killed
    * running sessions would be worse than no limit at all.
    */
+  | { t: 'loop.list'; projectId: string }
+  /** Create (no id) or change (id) a loop. Only these four fields are the owner's to set. */
+  | {
+      t: 'loop.set'
+      projectId: string
+      loop: { id?: string; sessionId: string; prompt: string; minutes: number; enabled: boolean }
+    }
+  | { t: 'loop.delete'; projectId: string; id: string }
   | { t: 'limits.get'; projectId: string }
   | { t: 'limits.set'; projectId: string; limits: BoardLimits }
   /**
@@ -1507,6 +1515,8 @@ export type ServerMessage =
    * at once, the count is how many the whole board has ever been told about. The panel draws no
    * "n of m" for that row for exactly this reason, since the two numbers do not divide.
    */
+  /** Every loop on this project's board, sent on request and after every change or firing. */
+  | { t: 'loops'; projectId: string; loops: CardLoop[] }
   | {
       t: 'limits'
       projectId: string
@@ -1580,7 +1590,16 @@ export type ServerMessage =
  * library is built on.
  */
 export const ROLE_SKILLS: Record<string, string[]> = {
-  orchestrator: ['canon-library', 'card-roots', 'double-blind-review', 'exit-interview', 'session-claims'],
+  // `hiring-a-card` is the orchestrator's alone because it is the only role with `creates`. Handing
+  // the procedure to a manager would describe a command its runtime refuses.
+  orchestrator: [
+    'canon-library',
+    'card-roots',
+    'hiring-a-card',
+    'double-blind-review',
+    'exit-interview',
+    'session-claims',
+  ],
   // No `canon-library`: a card that can both do the work and revise the description of what the
   // work was meant to be can never be found wrong. See the charter.
   manager: ['card-roots', 'double-blind-review', 'exit-interview', 'session-claims'],
@@ -1798,6 +1817,43 @@ export const ROLE_CHAIN: Array<{ id: string; label: string; answersTo: string | 
  * own hands, on purpose: a ceiling with an exception for whoever is most likely to be in a hurry
  * is not a ceiling.
  */
+/**
+ * A loop: a prompt Garden types into one card every N minutes, while the loop is on.
+ *
+ * The owner's words, 2026-09-11: "create loop section in the ceiling menus that allows me to
+ * toggle loops on/off and select frequency of checking in minutes." Until this existed the only
+ * loop on the board lived inside the orchestrator's own session as a harness timer, which the
+ * board could neither see nor stop.
+ *
+ * A loop never interrupts: it types only into a card whose status is `idle`. A card that is
+ * working, waiting on input, stopped or closed is left alone and `lastOutcome` says so, so a
+ * loop that is not firing reads as "held: card working" rather than as silence.
+ */
+export interface CardLoop {
+  id: string
+  projectId: string
+  sessionId: string
+  /** What is typed, verbatim, then Enter. */
+  prompt: string
+  /** How often, in whole minutes, 1 to 1440. */
+  minutes: number
+  enabled: boolean
+  /** When the prompt was last actually typed, or null if never. */
+  lastFiredAt: number | null
+  /** `typed`, or `held: <status>` from the last time the loop was due and could not type. */
+  lastOutcome: string | null
+  /**
+   * How many times this loop has actually typed its prompt into the card.
+   *
+   * Counts what happened rather than what was scheduled, so a loop that has been due nine times and
+   * held every time because the card was working still reads zero. The owner asked for it as a
+   * statistic and that is the only version of it worth showing: "every 15 minutes" is already on
+   * screen, and a count of intentions would just be the clock said back to him.
+   */
+  runs: number
+  createdAt: number
+}
+
 export interface BoardLimits {
   /** Cards with a live process, board-wide. */
   running: number

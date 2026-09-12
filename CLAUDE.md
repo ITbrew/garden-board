@@ -2,7 +2,31 @@
 
 A node-graph control room for AI CLI sessions. Windows 11, personal use, one user, one machine.
 
-Read `DEVELOPMENT.md` for architecture and what is built.
+Read `DEVELOPMENT.md` for architecture and what is built. Read `OPERATING.md` before working the
+board itself: making a card, changing one, wiring two together, what each role is refused, and what a
+session is equipped with.
+
+## Where the procedures are
+
+`.claude/skills/` holds the procedures a session on this board is expected to follow, and
+`ROLE_SKILLS` in `packages/shared/src/index.ts` decides which of them each role is given. Invoke one
+when the task matches its description rather than reading them all up front.
+
+| Skill | For |
+| --- | --- |
+| `hiring-a-card` | creating a card and giving it a specialized role |
+| `card-roots` | writing the brief a new card runs from |
+| `canon-library` | writing and revising the description of what the app is |
+| `double-blind-review` | verifying a visible change without grading your own screenshot |
+| `session-claims` | two sessions in one checkout |
+| `exit-interview` | closing a session so what was learned survives it |
+
+`templates/roots/` has a starting brief per role. `.claude/agents/` holds the agent definitions the
+skills call for, `blind-reviewer` among them.
+
+Some paths in this file point at the owner's own board (`docs/canonical/`, `~/.claude/`). A clone
+does not carry those, and nothing here depends on them: they are cited so the original can be found,
+not required to work.
 
 ## The rule this project exists to enforce
 
@@ -70,6 +94,14 @@ differ, which is what a backend restarted on its own looks like.
 
 ## Style
 
-Follow the machine's global instructions in `~/.claude/CLAUDE.md`. In short: no em dashes,
-prose over bullet lists, no decorative emoji, no hype, and lead status reports with what was
-actually verified rather than a test count.
+No em dashes. Prose over bullet lists; a list only when the content is genuinely a set. No decorative
+emoji and no hype. Do not call an idea good before evaluating it: what works, what does not, why.
+
+Lead a status report with what was actually verified rather than a test count, and name what you
+skipped. An unmentioned omission reads exactly like a pass. "The test passes" and "I read the code
+and it looks right" are different claims and only one of them is evidence.
+
+Never delete or overwrite something you did not create, and never run a test, a script or a harness
+against a live board or a real workspace. Give it its own instance, its own port and its own
+directory. That has cost real data here once, and it looked like the app losing it rather than a
+script.
