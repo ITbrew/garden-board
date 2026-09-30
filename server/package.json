@@ -14,13 +14,13 @@
     "@xterm/headless": "^6.0.0",
     "better-sqlite3": "^11.7.0",
     "node-pty": "^1.1.0",
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.13",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.2"
   }
 }
