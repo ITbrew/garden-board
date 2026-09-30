@@ -72,7 +72,7 @@ writeFileSync(join(dir, 'CLAUDE.md'), '# scratch\n')
  * no such command exists, quoting it back. So only whether this number CHANGED is ever read here,
  * never the number itself.
  */
-const WAKE = /just arrived on (?:one of your wires|your wires)/g
+const WAKE = /arrived on (?:one of your wires|your wires)/g
 const stream = new Map()
 const wakes = (id) => (String(stream.get(id) ?? '').match(WAKE) ?? []).length
 

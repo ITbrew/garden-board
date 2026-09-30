@@ -6,8 +6,12 @@ import './styles.css'
 import './subagent-list.css'
 // Notices when dist has been rebuilt under an already-open tab and reloads it. See the file.
 import { watchForNewBuild } from './build-refresh'
+// The heartbeat the working ring and the "needs you" pill brighten on. See the file for why it is not
+// a CSS animation.
+import { startPulse } from './pulse'
 
 watchForNewBuild()
+startPulse()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -18,8 +18,8 @@
     },
     {
       "test": "test-work-cap.mjs",
-      "since": "2026-09-08",
-      "reason": "The ceiling itself works: cards are counted, a message at the ceiling is accepted, held rather than typed in, and a card on a permission prompt is correctly not counted as working. What fails is the wording the sender is told (it reads as delivered rather than as held at the board ceiling) and the queued message never being typed in once a slot frees. Not investigated far enough to say which half is wrong, the behaviour or the test."
+      "since": "2026-09-30",
+      "reason": "It tests a cap on cards mid-turn (limits.working) that was never built, and the owner has since said the budget is \"Agent cards running at once\" (canon 15 revision 14), which is enforced, mail included (test-mail-waits-for-the-running-limit.mjs). Until 2026-09-30 it also looked for \"just arrived\", which the notice no longer says, so its earlier note here claiming the ceiling worked was read off a blind test. Retiring it is the owner call, because deleting a test is."
     }
   ]
 }

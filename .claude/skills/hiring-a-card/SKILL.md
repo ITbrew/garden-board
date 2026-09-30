@@ -5,9 +5,9 @@ description: The procedure for bringing a new card into existence on a Garden bo
 
 # Hiring a card
 
-Two documents already say what to write. `card-roots` says what makes a set of roots worth having,
-and `~/.garden/roots/detail/composing-roots.md` says what the eight columns are. Neither says how to
-make the card. This does: the decisions in the order they have to be made, and the commands.
+What a brief contains, in what order, and what it leaves out is
+`~/.garden/roots/detail/composing-roots.md`, and nowhere else. This says how to make the card: the
+decisions in the order they have to be made, and the commands.
 
 Canon: `docs/canonical/12-how-a-card-is-hired.md` for why, `16-who-hires.md` for who may.
 
@@ -39,13 +39,13 @@ permissions once at launch, so a role cannot be changed without restarting the c
 | --- | --- | --- |
 | `orchestrator` | yes | talks to the owner, owns the canon, the only role that may create |
 | `manager` | no | plans a department's work, hires specialists through its orchestrator, does its share |
-| `worker` | no | does the work itself, and is the only role that changes the repository |
-| `specialist` | no | one kind of problem, and depth in it is the reason it is not a general card |
+| `worker` | no | does the work itself, with no subagents and nobody below it |
 | `reviewer` | no | reads and reports, and is called by the orchestrator rather than by anyone else |
 | `verifier` | no | checks a claim against the thing it is about, and cannot edit or delegate |
 
-`boss` and `delegator` still exist and are layers Garden no longer has. Both run as a manager. Do not
-hire either one; the names survive for cards that predate the change.
+`boss` and `delegator` still exist and are layers Garden no longer has. Both run as a manager and
+read the manager's role file. Do not hire either one; the names survive for cards that predate the
+change. There is no `specialist` role: a specialist is a `worker` whose brief names its specialty.
 
 What each role is refused is generated from one table and told to the card in its own `POWERS.md`.
 Never hand-write a second copy of a deny list into the roots: a card told the editing tools are
@@ -56,33 +56,34 @@ denied while a shell sits open stops trusting the whole brief.
 The role is the shape. Four things make the card particular, and only the first is chosen by `--role`:
 
 - **The deny list**, from the role.
-- **The roots**, which say what this card is for, what it owns, what it must not touch, and who it
-  defers to. This is the load-bearing one. `card-roots` is how to write them and its test is the one
-  that matters: read them back and ask whether they could belong to a different card.
+- **The brief**, which says what this card is for, what it owns, what it must not touch, and who it
+  reports to. This is the load-bearing one. `composing-roots.md` is how to write it, and its test is
+  the one that matters: read it back and ask whether it could belong to a different card.
 - **`--owns`**, a comma separated list of paths. It is how "yours" becomes a fact rather than a hope.
 - **Its skills**, which is the section below.
 
-A card is specialized by all four agreeing. A card hired as a `specialist` with generic roots is a
-general card with a narrower deny list, which is worse than either.
+A card is specialized by all four agreeing. A worker hired with a generic brief is a general card
+with a narrower deny list, which is worse than either.
 
 ## The order, which is forced on you
 
 The card's own directory is named with its id, and the id does not exist until the card does. So:
 
-**1. Write the roots to a file first.** Use a file writing tool, never a heredoc. Real roots run to
-thousands of characters, and a command carrying that much prose cannot be security scanned, so it
-stops and waits for the owner. Put the file in your own outbox.
+**1. Write the brief to a file first**, as `composing-roots.md` says. Use a file writing tool, never
+a heredoc: a command carrying a brief cannot be security scanned, so it stops and waits for the
+owner. Put the file in your own outbox.
 
 **2. Create the card, switched off.**
 
 ```
-node "%GARDEN_BIN%\garden-hire.mjs" --title "Loader worker" --role worker --file "<path to roots>"
+node "$env:GARDEN_BIN\garden-hire.mjs" --title "Loader worker" --role worker --reports-to <your card id> --owns "src/loader" --file "<path to brief>"
 ```
 
-Other flags, all optional: `--reports-to <card id>` draws the wire, `--owns "path,path"`,
-`--model` and `--effort`, `--team-size <n>` for a card that will hire, `--adapter` (defaults to
-`claude`). The roots may go on stdin instead of `--file`, but not both: passing both is refused
-rather than guessed at.
+`--reports-to` and `--owns` go on every hire. Without `--reports-to` the card has no parent and no
+wire, so nothing can speak to it; without `--owns` nothing is enforced about where it edits. Other
+flags: `--model` and `--effort`, `--team-size <n>` for a card that will hire, `--adapter` (defaults
+to `claude`). The brief may go on stdin instead of `--file`, but not both: passing both is refused
+rather than guessed at. From bash the path is `"$GARDEN_BIN/garden-hire.mjs"`.
 
 It comes back whole and switched off. Its mailbox, its `CLAUDE.md`, its `PEERS.md` and its `ROOTS.md`
 are already written, and its skills are already copied in.
@@ -98,7 +99,7 @@ prompt. A prompt is gone when the turn ends; a file can be reread on turn forty 
 **5. Start it.**
 
 ```
-node "%GARDEN_BIN%\garden-hire.mjs" --start <card id>
+node "$env:GARDEN_BIN\garden-hire.mjs" --start <card id>
 ```
 
 **6. Deliver the work order by mail**, addressed by card id, and exchange one message in each

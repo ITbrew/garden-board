@@ -97,10 +97,15 @@ while (scroll.length === before && Date.now() < deadline) await sleep(50)
 const snap = scroll[scroll.length - 1]
 check('the server answered with a buffer', !!snap && snap.data.length > 0, `${snap?.data?.length} bytes`)
 
+/*
+ * The old raw buffer held both paints, and this test measured that the newer one covered the older.
+ * A running card's snapshot is now its serialized screen (canon 03 revision 17), so the older paint is
+ * gone before the replay starts; what is held here is only that the first, wide paint is not in it.
+ */
 check(
-  'the buffer really does hold two screens drawn at different widths',
-  snap.data.includes('READY-1') && snap.data.includes('READY-2'),
-  `DRAW-1 present: ${snap.data.includes('READY-1')}, DRAW-2 present: ${snap.data.includes('READY-2')}`,
+  'the snapshot is the screen as it stands, without the first, wide paint',
+  snap.data.includes('READY-') && !snap.data.includes('READY-1'),
+  JSON.stringify((snap.data.match(/READY-\d+/g) ?? []).join(',')),
 )
 check('the server reports the narrow geometry', snap.cols === NARROW, `${snap.cols}x${snap.rows}`)
 

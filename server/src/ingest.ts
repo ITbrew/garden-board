@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { MAX_TAIL_BYTES, TAIL_BYTES, readChat, tailLines } from './transcript.js'
+import { MAX_TAIL_BYTES, TAIL_BYTES, readChatPage, tailLines } from './transcript.js'
 import type {
   AgentEvent,
   ServerMessage,
@@ -50,6 +50,25 @@ export interface IngestDeps {
    * the board describes a conversation neither end can start.
    */
   refreshMail: (cardId: string) => void
+
+  /**
+   * The card has just been handed its unread mail in its startup brief, so the unread record for it
+   * can go. Called on SessionStart, which is the one moment a card that was switched off catches up
+   * on everything said to it while it was away.
+   */
+  mailRead: (cardId: string) => void
+  /** The card submitted a prompt, which is the proof a typed wake line was actually sent. */
+  promptSubmitted: (cardId: string) => void
+  /** The CLI has loaded its session and can take input, which printing and going quiet does not prove. */
+  cliStarted: (cardId: string) => void
+  /** Every hook event, by type, so input is never typed or re-entered into an open prompt or menu. */
+  hookSeen: (cardId: string, type: string, event: Record<string, unknown>) => void
+  /**
+   * True while this server is on its way down. A restart ends every CLI, and Claude answers with a
+   * SessionEnd that this server still receives; marking the card done then made the next boot leave
+   * it off instead of bringing it back. Optional so tests can build an Ingest without a server.
+   */
+  shuttingDown?: () => boolean
 }
 
 /** A hook payload, as posted by `server/hooks/garden-hook.mjs`. */
@@ -71,6 +90,14 @@ export interface HookBody {
  * Kept in step with CARD_W and CARD_H in index.ts by hand, since one is the size the server places
  * new cards at and this is the size it places hired ones at.
  */
+/** What a Codex card waiting on its own approval prompt shows as its reason. */
+/** How far back the first usage read reaches. Past it, the gauge waits for the next turn's own usage line. */
+const USAGE_MAX_BYTES = 16 * 1024 * 1024
+const CODEX_ASKING_REASON = 'Codex is asking for approval in its terminal'
+
+/** How often one card's chat is re-read from its transcript at most. See `pushChat`. */
+const CHAT_EVERY_MS = Number(process.env.GARDEN_CHAT_EVERY_MS) || 5000
+
 const CHILD_W = 340
 const CHILD_H = 260
 
@@ -116,6 +143,16 @@ function pick(o: Record<string, unknown>, ...names: string[]): string | null {
 }
 
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
+/**
+ * Whether a hook event came from a subagent running under the card rather than from the card's own
+ * turn. The CLI marks those with `agent_type` (and `agent_id` where it sends one); a card launched
+ * by Garden is never started with `--agent`, so its own events carry neither. A background
+ * subagent's tool calls after its parent's Stop used to read as the parent working again.
+ */
+export function fromSubagent(e: Record<string, unknown> | undefined): boolean {
+  return typeof e?.agent_type === 'string' || typeof e?.agent_id === 'string'
+}
+
 const DISPATCH_TOOLS = new Set(['Task', 'Agent'])
 
 /** Top-level payload fields some reader actually opens on a tool event. */
@@ -167,6 +204,11 @@ export class Ingest {
   private placeChild: IngestDeps['placeChild']
   private ensureCardMemory: IngestDeps['ensureCardMemory']
   private refreshMail: IngestDeps['refreshMail']
+  private mailRead: IngestDeps['mailRead']
+  private promptSubmitted: IngestDeps['promptSubmitted']
+  private cliStarted: IngestDeps['cliStarted']
+  private hookSeen: IngestDeps['hookSeen']
+  private shuttingDown: () => boolean
 
   /**
    * Dispatch calls seen but not yet matched to a SubagentStart, keyed by tool_use_id. The Agent
@@ -182,6 +224,11 @@ export class Ingest {
     this.placeChild = deps.placeChild
     this.ensureCardMemory = deps.ensureCardMemory
     this.refreshMail = deps.refreshMail
+    this.mailRead = deps.mailRead
+    this.promptSubmitted = deps.promptSubmitted
+    this.cliStarted = deps.cliStarted
+    this.hookSeen = deps.hookSeen
+    this.shuttingDown = deps.shuttingDown ?? (() => false)
   }
 
   // -------------------------------------------------------------------------
@@ -196,6 +243,7 @@ export class Ingest {
 
     const session = this.resolve(body.gardenSessionId, claudeSessionId)
     if (!session) return
+    this.hookSeen(session.id, type, e)
 
     // Learn the CLI's session id and transcript once, from the first event that carries them.
     const patch: Partial<TerminalSession> = {}
@@ -229,10 +277,17 @@ export class Ingest {
 
     switch (type) {
       case 'SessionStart':
+        this.cliStarted(session.id)
         this.setStatus(session.id, 'idle', null)
+        /*
+         * Whatever was waiting has just been read. The brief is composed by the hook before it posts
+         * this event, so by the time it arrives the card is already holding the backlog.
+         */
+        this.mailRead(session.id)
         break
 
       case 'UserPromptSubmit': {
+        this.promptSubmitted(session.id)
         const ask = pick(e, 'prompt') ?? ''
         this.openWork(session.id, promptId, 'owner', null, ask, body.receivedAt)
         this.setStatus(session.id, 'working', null)
@@ -240,14 +295,41 @@ export class Ingest {
       }
 
       case 'PreToolUse':
+        if (!fromSubagent(e)) this.toolWhileIdle(session.id)
         this.onPreTool(session, e)
         break
 
       case 'PostToolUse':
+        if (!fromSubagent(e)) this.toolWhileIdle(session.id)
         this.onPostTool(session, e, promptId)
         break
 
-      case 'Notification':
+      case 'Notification': {
+        /*
+         * Most notifications are not a question. Claude sends `idle_prompt` ("Claude is waiting for
+         * your input") after a minute at an empty prompt, and 741 of the last 760 notifications on
+         * the owner's board were that one; each turned an idle card red as "needs you", and because
+         * a card that needs you is never typed into, it also stopped Garden resending the Enter on a
+         * mail notice that had not gone through, which left the Keeper stuck during the first live
+         * run. Only a prompt that is actually open is a question.
+         */
+        const kind = pick(e, 'notification_type') ?? ''
+        /*
+         * The idle notice is the CLI saying it has sat at an empty prompt for a minute, so a card
+         * still marked working is wrong whatever set it. On 24 September the Keeper's CLI posted
+         * a PreToolUse (ScheduleWakeup) 2 s after its Stop and no PostToolUse; `toolWhileIdle` put
+         * the card back to working, and it read as working for 29 minutes until a false card-quiet
+         * finding. A card held at working also holds its mail, as DEF side's did.
+         */
+        if (kind === 'idle_prompt') {
+          if (this.store.getSession(session.id)?.status === 'working') this.setStatus(session.id, 'idle', null)
+          break
+        }
+        // Anything else purely informational leaves the status as the Stop or the last tool event set it.
+        if (kind && kind !== 'permission_prompt' && kind !== 'elicitation_dialog') break
+        this.setStatus(session.id, 'needs-input', pick(e, 'waiting_for', 'waitingFor') ?? pick(e, 'message') ?? 'input needed')
+        break
+      }
       case 'PermissionRequest': {
         const reason =
           pick(e, 'waiting_for', 'waitingFor') ??
@@ -280,7 +362,12 @@ export class Ingest {
 
       case 'SessionEnd':
         this.closeWork(session.id, promptId, body.receivedAt)
-        this.setStatus(session.id, 'done', null)
+        /*
+         * Not while Garden is restarting. The CLI ended because Garden ended it, and the owner asked
+         * for a restart to bring back every card that was alive ("why do i have to press turn on
+         * button to start u up again"). The status the card had stays, so the next boot revives it.
+         */
+        if (!this.shuttingDown()) this.setStatus(session.id, 'done', null)
         break
 
       case 'SubagentStart':
@@ -329,6 +416,18 @@ export class Ingest {
     const next = { ...current, ...patch }
     this.store.upsertSession(next)
     this.broadcast({ t: 'session.updated', session: next })
+  }
+
+  /**
+   * A Codex card's approval prompt, read off its screen by the server, since Codex sends no hooks.
+   * Asking sets `needs-input` like a Claude permission prompt, so the owner and the watchdog see it;
+   * the prompt gone puts back `idle`, but only over a status this set.
+   */
+  codexAsking(id: string, asking: boolean) {
+    const s = this.store.getSession(id)
+    if (!s) return
+    if (asking && s.status !== 'needs-input') this.setStatus(id, 'needs-input', CODEX_ASKING_REASON)
+    else if (!asking && s.status === 'needs-input' && s.waitingFor === CODEX_ASKING_REASON) this.setStatus(id, 'idle', null)
   }
 
   private setStatus(id: string, status: SessionStatus, waitingFor: string | null) {
@@ -434,6 +533,15 @@ export class Ingest {
   // -------------------------------------------------------------------------
   // Tools
   // -------------------------------------------------------------------------
+
+  /**
+   * A turn can start with no UserPromptSubmit (a background task finishing, a resumed conversation),
+   * and the card then worked for minutes under "idle" while its unread mail was reported as
+   * neglected. A tool call is proof of a turn.
+   */
+  private toolWhileIdle(sessionId: string) {
+    if (this.store.getSession(sessionId)?.status === 'idle') this.setStatus(sessionId, 'working', null)
+  }
 
   private onPreTool(session: TerminalSession, e: Record<string, unknown>) {
     const tool = pick(e, 'tool_name', 'toolName')
@@ -807,7 +915,33 @@ export class Ingest {
    */
   private chatSeen = new Map<string, string>()
 
+  /**
+   * At most once every CHAT_EVERY_MS per card, with the last call of a burst always delivered.
+   *
+   * Each call can read megabytes of transcript (the window grows until it holds sixty turns, up to
+   * MAX_TAIL_BYTES), and a working card's transcript changes on every hook. A live profile on
+   * 23 September found one such read holding the server for 2.1 s, a board freeze on its own.
+   */
+  private chatAt = new Map<string, number>()
+  private chatLater = new Map<string, ReturnType<typeof setTimeout>>()
+
   private pushChat(sessionId: string) {
+    if (this.chatLater.has(sessionId)) return
+    const wait = (this.chatAt.get(sessionId) ?? 0) + CHAT_EVERY_MS - Date.now()
+    if (wait > 0) {
+      const t = setTimeout(() => {
+        this.chatLater.delete(sessionId)
+        this.pushChat(sessionId)
+      }, wait)
+      t.unref?.()
+      this.chatLater.set(sessionId, t)
+      return
+    }
+    this.chatAt.set(sessionId, Date.now())
+    this.readAndPushChat(sessionId)
+  }
+
+  private readAndPushChat(sessionId: string) {
     const session = this.store.getSession(sessionId)
     if (!session) return
     const path = this.transcriptFor(session)
@@ -817,7 +951,22 @@ export class Ingest {
       const stamp = `${st.size}:${st.mtimeMs}`
       if (this.chatSeen.get(sessionId) === stamp) return
       this.chatSeen.set(sessionId, stamp)
-      this.broadcast({ t: 'agent.chat', sessionId, turns: readChat(path) })
+      /*
+       * The newest page, with its offsets, so a card holding older pages merges this in rather than
+       * being replaced by it. A card scrolled back through an hour of work used to snap back to the
+       * last sixty turns the moment the agent said anything, because this sent sixty turns and
+       * nothing to say where they sat.
+       */
+      const page = readChatPage(path, null)
+      this.broadcast({
+        t: 'agent.chat',
+        sessionId,
+        turns: page.turns,
+        cursor: page.cursor,
+        atStart: page.atStart,
+        older: false,
+        file: path,
+      })
     } catch {
       // A transcript that vanished or cannot be read is not worth an error here. The card keeps
       // whatever it already had and says so through its own empty states.
@@ -853,11 +1002,28 @@ export class Ingest {
     } catch {
       return
     }
+    /*
+     * Only what was appended since the last read. Usage changes only when a new usage line or a
+     * compaction boundary is written, and a card whose tail held no usage line had the whole growing
+     * window, up to 52 MB, read and split again on every timer tick and hook: 2.3 to 3.4 s freezes
+     * on the live board (profile, 23 September, after the chat throttle).
+     */
+    const prev = this.usageReadAt.get(sessionId)
+    this.usageReadAt.set(sessionId, { path, size })
+    if (prev && prev.path === path && size >= prev.size) {
+      if (size === prev.size) return
+      // A little overlap, since the first line of a window is dropped as partial.
+      this.scanUsage(session, path, Math.min(size, size - prev.size + 64 * 1024))
+      return
+    }
     for (let window = TAIL_BYTES; ; window *= 4) {
       if (this.scanUsage(session, path, window)) return
-      if (window >= size || window >= MAX_TAIL_BYTES) return
+      if (window >= size || window >= USAGE_MAX_BYTES) return
     }
   }
+
+  /** Each card's transcript and its size at the last usage read. */
+  private usageReadAt = new Map<string, { path: string; size: number }>()
 
   /** One pass over one window. True when it found the record it was looking for. */
   private scanUsage(session: TerminalSession, path: string, window: number): boolean {

@@ -11,7 +11,8 @@
  * The two facts Garden compares are the version the process recorded for itself in the CLI's
  * registry, and the version the executable on disk reports.
  */
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { existsSync, readFileSync, statSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -31,12 +32,38 @@ const versionCache = new Map<string, { mtimeMs: number; version: string | null }
 /** Where a CLI lives, resolved from PATH once, because PATH does not change while a server runs. */
 const pathCache = new Map<string, string | null>()
 
-function resolveExecutable(command: string): string | null {
-  if (pathCache.has(command)) return pathCache.get(command) ?? null
+/*
+ * Both probes run asynchronously, and until they answer the version is unknown (null, never
+ * pending). They used to run with execFileSync inside the first broadcast after a start and after
+ * every CLI update: `where claude` and `claude --version` together held the server for 1.6 s on the
+ * 24 September database copy with the processor throttled, and every request in flight froze.
+ */
+const run = promisify(execFile)
+const probing = new Set<string>()
+
+function probe(command: string): void {
+  if (probing.has(command)) return
+  probing.add(command)
+  void (async () => {
+    try {
+      if (!pathCache.has(command)) pathCache.set(command, await resolveExecutable(command))
+      const exe = pathCache.get(command)
+      if (!exe) return
+      const mtimeMs = statSync(exe).mtimeMs
+      versionCache.set(exe, { mtimeMs, version: await askVersion(exe) })
+    } catch {
+      // Unknown stays unknown; the next read asks again.
+    } finally {
+      probing.delete(command)
+    }
+  })()
+}
+
+async function resolveExecutable(command: string): Promise<string | null> {
   let found: string | null = null
   try {
     const finder = process.platform === 'win32' ? 'where' : 'which'
-    const out = execFileSync(finder, [command], { encoding: 'utf8', timeout: 5000 })
+    const { stdout: out } = await run(finder, [command], { encoding: 'utf8', timeout: 5000, windowsHide: true })
     const hits = out.split(/\r?\n/).map((s) => s.trim()).filter((s) => s && existsSync(s))
     /*
      * The first line is not the answer on Windows, and finding that out cost two failing runs.
@@ -56,7 +83,6 @@ function resolveExecutable(command: string): string | null {
     // Not on PATH, or the lookup itself failed. Null means unknown, which is never pending.
     found = null
   }
-  pathCache.set(command, found)
   return found
 }
 
@@ -68,7 +94,7 @@ function resolveExecutable(command: string): string | null {
  * changed the thing it was asked to measure, under sixteen live processes, without anybody asking
  * for it. Garden coordinates restarts; it never installs.
  */
-function askVersion(exe: string): string | null {
+async function askVersion(exe: string): Promise<string | null> {
   try {
     /*
      * A `.cmd` shim has to go through `cmd.exe`, because node will not spawn one directly any more.
@@ -77,17 +103,8 @@ function askVersion(exe: string): string | null {
      * came from `where`, and an npm global install of Codex is exactly this shape.
      */
     const batch = process.platform === 'win32' && /\.(cmd|bat)$/i.test(exe)
-    const out = batch
-      ? execFileSync('cmd.exe', ['/d', '/c', exe, '--version'], {
-          encoding: 'utf8',
-          timeout: 10000,
-          env: { ...process.env, DISABLE_AUTOUPDATER: '1' },
-        })
-      : execFileSync(exe, ['--version'], {
-          encoding: 'utf8',
-          timeout: 10000,
-          env: { ...process.env, DISABLE_AUTOUPDATER: '1' },
-        })
+    const opts = { encoding: 'utf8' as const, timeout: 10000, windowsHide: true, env: { ...process.env, DISABLE_AUTOUPDATER: '1' } }
+    const { stdout: out } = batch ? await run('cmd.exe', ['/d', '/c', exe, '--version'], opts) : await run(exe, ['--version'], opts)
     const m = /(\d+\.\d+\.\d+)/.exec(out)
     return m ? m[1] : null
   } catch {
@@ -105,7 +122,11 @@ function askVersion(exe: string): string | null {
 export function installedVersionFor(adapterId: string): string | null {
   const command = adapterId === 'claude' ? 'claude' : adapterId === 'codex' ? 'codex' : null
   if (!command) return null
-  const exe = resolveExecutable(command)
+  if (!pathCache.has(command)) {
+    probe(command)
+    return null
+  }
+  const exe = pathCache.get(command)
   if (!exe) return null
 
   let mtimeMs = 0
@@ -116,9 +137,8 @@ export function installedVersionFor(adapterId: string): string | null {
   }
   const hit = versionCache.get(exe)
   if (hit && hit.mtimeMs === mtimeMs) return hit.version
-  const version = askVersion(exe)
-  versionCache.set(exe, { mtimeMs, version })
-  return version
+  probe(command)
+  return null
 }
 
 /** Only for tests, which change an executable's mtime faster than a filesystem timestamp resolves. */

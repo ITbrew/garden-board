@@ -45,6 +45,35 @@ const read = (dir, name) => {
   }
 }
 
+/**
+ * The messages this card has not been told about, or null when that is not known.
+ *
+ * Garden writes `.unread.json` beside INBOX.md whenever it files a message, holding the count and
+ * the byte at which the first unread entry begins, and removes it once the card has been told. The
+ * slice is taken on a Buffer rather than a string because the offset is a file size in bytes and
+ * INBOX.md carries prose that is not all one byte per character.
+ *
+ * Absent, unreadable or nonsense means null, and the caller falls back to the old blind tail. This
+ * file is a convenience for a brief, so it may never be the reason a card fails to start.
+ */
+const readUnread = (dir) => {
+  try {
+    const mark = JSON.parse(readFileSync(join(dir, '.unread.json'), 'utf8'))
+    const offset = Number(mark?.offset)
+    const count = Number(mark?.count)
+    if (!Number.isFinite(offset) || offset < 0 || !Number.isFinite(count) || count < 0) return null
+    // Caught up. An explicit zero, which is different from no marker: that one means unknown and
+    // falls back to the old tail, this one means there is nothing to hand over at all.
+    if (count === 0) return { text: '', count: 0 }
+    const buf = readFileSync(join(dir, 'INBOX.md'))
+    if (offset >= buf.length) return null
+    const text = buf.subarray(offset).toString('utf8').trim()
+    return text ? { text, count } : null
+  } catch {
+    return null
+  }
+}
+
 const readPath = (path) => {
   try {
     return path ? readFileSync(path, 'utf8').trim() : ''
@@ -387,7 +416,9 @@ function verifierRefusal(event) {
      */
     const head = command.trim().replace(/^node\s+/i, '').replace(/^["']/, '').replace(/\\/g, '/').toLowerCase()
     const first = head.split(/["'\s]/)[0]
-    const isShim = ['garden-send.mjs', 'garden-hire.mjs', 'garden-task.mjs'].some(
+    // garden-keeper.mjs and garden-eyes.mjs are the Keeper's (canon 27): one reads and records through
+    // the server, the other looks at the board read-only. Neither edits anything.
+    const isShim = ['garden-send.mjs', 'garden-hire.mjs', 'garden-task.mjs', 'garden-keeper.mjs', 'garden-eyes.mjs'].some(
       (s) => first === s || first.endsWith(`/${s}`),
     )
     /*
@@ -786,6 +817,15 @@ function sessionStartContext() {
    * time it spent switched off, and the trim marker names the file for the rest.
    */
   const INBOX_MAX = 400
+
+  /*
+   * What the unread slice may take, when Garden knows which slice that is.
+   *
+   * Fifteen times the blind tail, and still safe, because this is bounded by what was actually said
+   * to the card rather than by the size of its whole history. The cap is here for the pathological
+   * case only: a card left off for a week while a dozen others wrote to it.
+   */
+  const UNREAD_MAX = 6000
   const wanted = []
   const ask = (text, path, keep = 'head', lead = null, first = false) => {
     if (text) wanted.push({ text, path, keep, lead, first })
@@ -869,15 +909,53 @@ function sessionStartContext() {
    * handed over. The tail rather than the whole file, because an inbox is a permanent record and
    * the old end of it is history, not instructions.
    */
-  const inbox = read(dir, 'INBOX.md')
-  if (inbox) {
+  const unread = readUnread(dir)
+  if (unread && unread.count === 0) {
+    // Nothing waiting, and Garden knows it. No inbox section at all.
+  } else if (unread) {
+    /*
+     * The messages this card has genuinely not seen, sliced at the byte Garden recorded when the
+     * first of them was appended.
+     *
+     * This is what the 400 character tail above was standing in for, badly. A card returning to
+     * sixty messages was handed the end of the last one and a note saying earlier entries were not
+     * shown, which is not a handover. Now the unread part is exact, so it can be given a real
+     * allowance without the old risk: an inbox on this board reaches 281,000 characters, but the
+     * part of it nobody has read yet is almost always a few thousand at most, and a card that has
+     * been off for days is exactly the card that needs those.
+     */
     wanted.push({
-      text: inbox,
+      text: unread.text,
       path: join(dir, 'INBOX.md'),
       keep: 'tail',
-      lead: 'Messages arrived on your wires while you were off. Read these before you start, and reply along the wire each came from:',
-      cap: INBOX_MAX,
+      /*
+       * The count, and no promise about completeness.
+       *
+       * This said "and this is all of them" until the backfill produced a card holding 245,000
+       * characters of unread mail, which the budget trims like anything else. The trim marker names
+       * the file, so a card can go and read the rest; a lead claiming the brief was complete would
+       * have told it not to bother.
+       */
+      lead:
+        `${unread.count} message${unread.count === 1 ? '' : 's'} arrived on your wires while you were off. ` +
+        'Read these before you start, and reply along the wire each came from:',
+      cap: UNREAD_MAX,
     })
+  } else {
+    /*
+     * No marker, so which part is unread is not known. Mail sent before Garden started recording
+     * this, and mail to a card whose marker was cleared, both land here and get the old behaviour.
+     */
+    const inbox = read(dir, 'INBOX.md')
+    if (inbox) {
+      wanted.push({
+        text: inbox,
+        path: join(dir, 'INBOX.md'),
+        keep: 'tail',
+        lead: 'Messages arrived on your wires while you were off. Read these before you start, and reply along the wire each came from:',
+        cap: INBOX_MAX,
+      })
+    }
   }
 
   /*

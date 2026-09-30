@@ -180,25 +180,128 @@ export function readChat(path: string, limit = 60): ChatTurn[] {
   }
 }
 
+/** A page of a conversation, and where it sits in the file it was read from. */
+export interface ChatPage {
+  /** Oldest first. Each carries `off`, the byte offset of the line it came from. */
+  turns: Array<ChatTurn & { off: number }>
+  /** Byte offset of the first line this page used. The next page up asks for turns before it. */
+  cursor: number
+  /** True when this page reached the first line of the file. */
+  atStart: boolean
+}
+
+/** How much to read first, before growing. The same starting size `readChat` uses. */
+const PAGE_FIRST_BYTES = TAIL_BYTES
+
+/**
+ * One page of a card's conversation, ending at a byte offset, read backwards.
+ *
+ * `readChat` reads a window off the end and grows it, re-parsing each time, and gives up at 32MB.
+ * That is right for the last sixty turns and cannot reach the start of the transcripts this board
+ * actually has: the Orchestrator's is 735MB and seventeen of thirty-six were over the ceiling. The
+ * owner asked to scroll a card back through its whole conversation, so this reads the part of the
+ * file ending at `before` and no more, and says where it began. Each request costs what it returns,
+ * whatever the size of the file.
+ *
+ * **`before` is always the start of a line**, because it is always a `cursor` this function handed
+ * back, or the end of the file. So the bytes read end exactly on a line boundary and every piece
+ * after the first is a whole record. The first piece began before the read did, unless the read
+ * reached the start of the file, and it is dropped. A record larger than the read, and records here
+ * reach several hundred kilobytes, just makes the read grow until the whole line is inside it.
+ *
+ * The file is split on newline BYTES rather than on characters. An offset counted in characters
+ * drifts from the file's own offsets by one for every multi-byte character before it, and a cursor
+ * that has drifted lands inside a record.
+ *
+ * Turns are kept a whole line at a time, so a page may carry slightly more than `limit`: cutting
+ * inside a line would split an assistant message from the tool calls it made in the same record.
+ */
+export function readChatPage(path: string, before: number | null, limit = 60): ChatPage {
+  const empty: ChatPage = { turns: [], cursor: 0, atStart: true }
+  if (!path || !existsSync(path)) return empty
+  let size = 0
+  try {
+    size = statSync(path).size
+  } catch {
+    return empty
+  }
+  const end = before === null ? size : Math.max(0, Math.min(Math.floor(before), size))
+  if (end === 0) return empty
+
+  const fd = openSync(path, 'r')
+  try {
+    for (let window = PAGE_FIRST_BYTES; ; window *= 2) {
+      const lo = Math.max(0, end - window)
+      const buf = Buffer.allocUnsafe(end - lo)
+      readSync(fd, buf, 0, end - lo, lo)
+
+      // Line starts, as absolute byte offsets, and the lines themselves.
+      const lines: Array<{ off: number; text: string }> = []
+      let start = 0
+      for (let i = 0; i < buf.length; i++) {
+        if (buf[i] !== 0x0a) continue
+        if (i > start) lines.push({ off: lo + start, text: buf.toString('utf8', start, i) })
+        start = i + 1
+      }
+      // A last line with no newline after it, which only the end of the file can produce.
+      if (start < buf.length) lines.push({ off: lo + start, text: buf.toString('utf8', start) })
+      // The first piece began before this read did, unless the read began at the file's start.
+      if (lo > 0) lines.shift()
+
+      // Newest first, a whole line at a time, until there are enough.
+      const kept: Array<ChatTurn & { off: number }> = []
+      let cursor = end
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const turns = turnsFromLine(lines[i].text)
+        cursor = lines[i].off
+        kept.unshift(...turns.map((t) => ({ ...t, off: lines[i].off })))
+        if (kept.length >= limit) break
+      }
+
+      const readAll = lo === 0 && (lines.length === 0 || cursor === lines[0].off)
+      if (kept.length >= limit || lo === 0) {
+        return { turns: kept, cursor: lines.length ? cursor : 0, atStart: readAll }
+      }
+      // Not enough in this much of the file, so read further back and try again.
+    }
+  } catch {
+    return empty
+  } finally {
+    closeSync(fd)
+  }
+}
+
 function turnsFrom(lines: string[]): ChatTurn[] {
   const turns: ChatTurn[] = []
-  for (const line of lines) {
+  for (const line of lines) turns.push(...turnsFromLine(line))
+  return turns
+}
+
+/**
+ * The turns one transcript line holds, which is none, one, or several.
+ *
+ * Split out of `turnsFrom` so the paging reader can build the same turns while knowing which line,
+ * and so which byte offset, each one came from. One definition of what a line means, read by both.
+ */
+function turnsFromLine(line: string): ChatTurn[] {
+  const turns: ChatTurn[] = []
+  {
     let rec: any
     try {
       rec = JSON.parse(line)
     } catch {
-      continue
+      return turns
     }
     const msg = rec?.message
-    if (!msg) continue
+    if (!msg) return turns
     const at = typeof rec.timestamp === 'string' ? Date.parse(rec.timestamp) || null : null
 
     if (rec.type === 'user' || msg.role === 'user') {
       const isToolResult = Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === 'tool_result')
       const text = textOf(msg.content).trim()
-      if (isToolResult || !text) continue
+      if (isToolResult || !text) return turns
       turns.push({ role: 'asked', text: text.slice(0, 4000), at })
-      continue
+      return turns
     }
 
     if (rec.type === 'assistant' || msg.role === 'assistant') {

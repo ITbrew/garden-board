@@ -20,14 +20,18 @@
 import { createRequire } from 'node:module'
 import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { startInstance } from './lib/instance.mjs'
 
-const require = createRequire('C:/Garden/package.json')
+// The repository root, from this file's own location. This said `C:/Garden`, which is not where this
+// checkout is, so requiring ws or puppeteer-core threw before the capture could begin.
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const require = createRequire(join(ROOT, 'package.json'))
 const WebSocket = require('ws')
 const puppeteer = require('puppeteer-core').default ?? require('puppeteer-core')
 
-const OUT = 'C:\\Garden\\docs\\shots'
+const OUT = join(ROOT, 'docs', 'shots')
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 const WIDE = 1440
 const TALL = 950

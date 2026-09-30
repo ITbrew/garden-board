@@ -24,6 +24,9 @@
  */
 import { execFileSync, spawn } from 'node:child_process'
 import { connect } from 'node:net'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const argv = process.argv.slice(2)
 const arg = (name) => {
@@ -37,6 +40,38 @@ const port = Number(arg('port'))
 // stop the owner's real Vite.
 const webPort = Number(arg('web-port')) || 0
 const cwd = arg('cwd') || process.cwd()
+
+/**
+ * Where `npm run dev:web` actually resolves, which is NOT always the server's own directory.
+ *
+ * `--cwd` is the old server's `process.cwd()`. Started through `npm run dev:server`, that is the
+ * `@garden/server` workspace, and that workspace has no `dev:web` script: only the repo root does.
+ * So the page half was killed and its replacement died instantly on `Missing script: "dev:web"`,
+ * with `stdio: 'ignore'` swallowing the reason. The board then fell back to the server serving
+ * `apps/web/dist`, which on the owner's machine was a week-old bundle, so a restart silently
+ * returned him to an old UI and every client fix since looked like it had never landed.
+ *
+ * Measured, not guessed: `npm run dev:web` in `E:\Garden\server` exits with
+ * `Missing script: "dev:web"`.
+ *
+ * So pick the first directory that really declares the script, rather than assuming either one.
+ */
+function dirDeclaring(script, candidates) {
+  for (const dir of candidates) {
+    if (!dir) continue
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+      if (pkg?.scripts?.[script]) return dir
+    } catch {
+      // No package.json, or an unreadable one. Not this directory, and not a reason to stop.
+    }
+  }
+  return null
+}
+
+/** The repo root, from this file's own location: <root>/server/bin/garden-restart.mjs. */
+const selfRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const webCwd = dirDeclaring('dev:web', [cwd, selfRoot])
 // The old server's own pid, for the case where it will not leave. Absent means nothing is ever
 // force-killed here: the helper waits on the port and gives up, which is what it always did.
 const oldPid = Number(arg('pid')) || 0
@@ -123,11 +158,20 @@ if (webPort) await replacePageHalf()
 
 async function replacePageHalf() {
   /*
-   * Replace, rather than ensure it is running. A port with nothing on it means the board is being
-   * served some other way, most likely the built app on the backend's own port, and starting a dev
-   * server the owner did not ask for is not a restart.
+   * Ensure it is running, not only replace one that is. This used to return when nothing was
+   * listening, so a restart after Vite had died brought the backend back and left the page dead
+   * until the owner relaunched: "it should be a one shot for vite/garden reset. not 2 step process
+   * like it has been". A webPort is only ever given by the launcher, so a page half here is one he
+   * asked for. Canon 22 revision 9.
    */
-  if (!(await listening(webPort))) return
+
+  /*
+   * Before killing anything, not after. Checked here because the kill is the irreversible half:
+   * a restart that stops the page half and then cannot start it again leaves the owner on whatever
+   * stale `dist` the backend happens to serve, silently. If no directory declares `dev:web`, the
+   * running page half is the best thing available and is left alone.
+   */
+  if (!webCwd) return
 
   const pids = holdersOf(webPort)
   for (const pid of pids) {
@@ -151,17 +195,46 @@ async function replacePageHalf() {
    * Started the way the launcher starts it, through npm, so there is one definition of what the page
    * half is. Hidden and with its output dropped: a console here would be a window the owner did not
    * open, and a console Garden writes to is how the board froze twice (see scripts/launch.ps1).
+   *
+   * GARDEN_WEB_PORT is what makes the start as targeted as the kill. `npm run dev:web` used to bind
+   * whatever apps/web/vite.config.ts said, which was the literal 5177, so this function would stop a
+   * page half on the port it was given and then raise one on the owner's. That is not a theory: on
+   * 2026-09-18 a suite test on the other PC did exactly this and put a second Vite on 5177 while he
+   * was working. Replacing a page half on port N now means starting one on port N.
    */
+  const webEnv = { ...process.env, GARDEN_WEB_PORT: String(webPort) }
+  /*
+   * Vite itself, started by node, with no `cmd.exe` anywhere in the chain. On a machine whose default
+   * console host is Windows Terminal, a `cmd.exe` opens a visible terminal window whatever
+   * `windowsHide` says, and it sat on the owner's desktop for as long as Garden ran: "can u make the
+   * vite server windows run in the background as well". Measured on a spare port: `cmd.exe /c npm run
+   * dev:web` and npm's own script under node each added a Windows Terminal console; this added none
+   * and served the page. The backend above never had the problem because its chain has no cmd in it.
+   * Canon 22 revision 8. The npm route below stays as the fallback for a checkout laid out otherwise.
+   */
+  const viteBin = join(webCwd, 'node_modules', 'vite', 'bin', 'vite.js')
+  const webDir = join(webCwd, 'apps', 'web')
+  if (existsSync(viteBin) && existsSync(join(webDir, 'vite.config.ts'))) {
+    const web = spawn(process.execPath, [viteBin], {
+      cwd: webDir,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: webEnv,
+    })
+    web.unref()
+    return
+  }
   const web =
     process.platform === 'win32'
       ? spawn('cmd.exe', ['/c', 'npm run dev:web'], {
-          cwd,
+          cwd: webCwd,
           detached: true,
           stdio: 'ignore',
           windowsHide: true,
-          env: process.env,
+          env: webEnv,
         })
-      : spawn('npm', ['run', 'dev:web'], { cwd, detached: true, stdio: 'ignore', windowsHide: true, env: process.env })
+      : spawn('npm', ['run', 'dev:web'], { cwd: webCwd, detached: true, stdio: 'ignore', windowsHide: true, env: webEnv })
   web.unref()
 }
 

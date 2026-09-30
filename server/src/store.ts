@@ -19,6 +19,7 @@ import type {
   TaskContract,
   TaskReassignment,
   TaskState,
+  Finding,
 } from '@garden/shared'
 import { DEFAULT_LIMITS } from '@garden/shared'
 
@@ -59,7 +60,10 @@ export const DATA_DIR = process.env.GARDEN_HOME || join(homedir(), '.garden')
  * away his projects and account bindings every time they ran, and looked from the outside like
  * the app forgetting which account a tab used.
  */
-const DB_PATH = process.env.GARDEN_DB || join(DATA_DIR, 'garden.db')
+/** Event types the refusal list is built from; recording one clears its cache. */
+const REFUSAL_TYPES = new Set(['TaskRefused', 'TaskWouldRefuse', 'SenderUnverified'])
+
+export const DB_PATH = process.env.GARDEN_DB || join(DATA_DIR, 'garden.db')
 
 export class Store {
   private db: Database.Database
@@ -287,6 +291,52 @@ export class Store {
         payload TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(sessionId, ts);
+      CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, ts);
+      -- Deliveries by task id, for hopsForTask on every POST /mail. See mailDeliveredForTask.
+      CREATE INDEX IF NOT EXISTS idx_events_mail_task ON events(json_extract(payload, '$.taskId')) WHERE type = 'MailDelivered';
+
+      -- One row per message a card has not been told about yet.
+      --
+      -- This exists because the count used to live in a Map in the server process and nothing else.
+      -- A board restart therefore set every card's unread badge to zero while the messages sat in
+      -- the INBOX.md files untouched, and the owner spent weeks watching mail apparently vanish.
+      -- The messages were never lost; the only record that they were UNREAD was.
+      --
+      -- inboxOffset is how many bytes INBOX.md held before this entry was appended, which makes
+      -- the smallest offset still pending an exact read marker: everything from there to the end of
+      -- the file is what this card has not seen. That is what a returning card is handed, in place
+      -- of the last 400 characters it used to get.
+      CREATE TABLE IF NOT EXISTS mail_pending (
+        id TEXT PRIMARY KEY,
+        sessionId TEXT NOT NULL,
+        fromTitle TEXT NOT NULL,
+        kind TEXT,
+        taskId TEXT,
+        at INTEGER NOT NULL,
+        inboxOffset INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_mail_pending_session ON mail_pending(sessionId, at);
+
+      -- What the watchdog noticed (docs/canonical/27-the-overseer.md). One live row per kind and
+      -- subject: a recurrence moves lastSeen and count rather than adding a row, which is the lesson
+      -- of the four-day flood that wrote one row per repeat.
+      CREATE TABLE IF NOT EXISTS findings (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        projectId TEXT,
+        severity TEXT NOT NULL,
+        title TEXT NOT NULL,
+        detail TEXT,
+        evidence TEXT,
+        state TEXT NOT NULL,
+        firstSeen INTEGER NOT NULL,
+        lastSeen INTEGER NOT NULL,
+        count INTEGER NOT NULL,
+        note TEXT,
+        resolvedAt INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_findings_live ON findings(state, kind, subject);
 
       -- Claude Code deletes these off disk after 30 days. This table is the copy that outlives
       -- that rotation, so a session or subagent run is still readable long after the CLI has
@@ -450,6 +500,8 @@ export class Store {
         defaultProfileId: 'TEXT',
         /* Closed tabs keep their board and leave the row; see setProjectArchived. */
         archived: 'INTEGER NOT NULL DEFAULT 0',
+        /* Where the tab sits in the row; see setTabOrder. Null until tabs are first ordered. */
+        tabOrder: 'INTEGER',
       },
       profiles: {
         accountEmail: 'TEXT',
@@ -611,9 +663,31 @@ export class Store {
    */
   listProjects(): Project[] {
     const rows = this.db
-      .prepare('SELECT * FROM projects WHERE COALESCE(archived, 0) = 0 ORDER BY lastOpenedAt DESC')
+      .prepare('SELECT * FROM projects WHERE COALESCE(archived, 0) = 0 ORDER BY tabOrder IS NULL, tabOrder, lastOpenedAt DESC')
       .all() as any[]
     return rows.map((r) => this.hydrateProject(r))
+  }
+
+  /**
+   * The open tabs in the order given, which is the order he dragged them into. Canon 02 revision 17.
+   * Ids not open are ignored, and open tabs the list leaves out keep their places after it, so a
+   * list from a page that had not heard of a new tab yet cannot lose that tab.
+   */
+  setTabOrder(ids: string[]) {
+    const open = this.listProjects().map((p) => p.id)
+    const order = [...ids.filter((id) => open.includes(id)), ...open.filter((id) => !ids.includes(id))]
+    const set = this.db.prepare('UPDATE projects SET tabOrder = ? WHERE id = ?')
+    this.db.transaction(() => order.forEach((id, i) => set.run(i, id)))()
+  }
+
+  /**
+   * Put a tab at the right end of the row, beside +, for a tab just opened or reopened. Tabs that
+   * were never ordered are numbered first, in the order they show, so the new one lands after them
+   * rather than before every tab without a number.
+   */
+  placeTabLast(id: string) {
+    const others = this.listProjects().map((p) => p.id).filter((x) => x !== id)
+    this.setTabOrder([...others, id])
   }
 
   /** The tabs he has closed, newest first, so one can be picked back up by name. */
@@ -823,9 +897,15 @@ export class Store {
     })
   }
 
-  /** The card a CLI session id belongs to. Set from the first hook event, never guessed. */
+  /**
+   * The card a CLI session id belongs to. Set from the first hook event, never guessed.
+   *
+   * A subagent's card carries its parent's id, so the terminal card is preferred. Newest-first alone
+   * returned a finished subagent for any card that had ever dispatched one, and the CLI's own status
+   * file was then never applied to it: PC2 read "idle" for twenty minutes while its file said busy.
+   */
   findSessionByClaudeId(claudeSessionId: string): TerminalSession | undefined {
-    const row = this.db.prepare('SELECT * FROM sessions WHERE claudeSessionId = ? ORDER BY createdAt DESC')
+    const row = this.db.prepare("SELECT * FROM sessions WHERE claudeSessionId = ? ORDER BY (kind = 'session') DESC, createdAt DESC")
       .get(claudeSessionId) as any
     return row ? hydrateSession(row) : undefined
   }
@@ -1071,7 +1151,27 @@ export class Store {
    *
    * Newest first and capped: this grows for as long as shadow mode is on.
    */
+  /**
+   * The refusal list, kept in memory until a refusal is recorded or events are deleted, and for at
+   * most 30 s otherwise (a card moved to another project changes which rows belong where).
+   *
+   * Measured on the owner's database on 23 September: 2,220 refusal rows among 59,000 events in a
+   * 350 MB file, and 1.8 s per state message across three projects. Every page connect and every
+   * `hello` built one, so the board froze for that long each time. This was most of the freezes the
+   * validation run saw at 34% CPU.
+   */
+  private refusalCache = new Map<string, { at: number; rows: AgentEvent[] }>()
+
   listTaskRefusals(projectId: string, limit = 200): AgentEvent[] {
+    const key = `${projectId}\u0000${limit}`
+    const hit = this.refusalCache.get(key)
+    if (hit && Date.now() - hit.at < 30_000) return hit.rows
+    const rows = this.readTaskRefusals(projectId, limit)
+    this.refusalCache.set(key, { at: Date.now(), rows })
+    return rows
+  }
+
+  private readTaskRefusals(projectId: string, limit: number): AgentEvent[] {
     /*
      * A LEFT JOIN and the board row, rather than an inner join on the sender's card.
      *
@@ -1389,6 +1489,7 @@ export class Store {
   deleteWorkForSession(sessionId: string) {
     this.db.prepare('DELETE FROM work WHERE sessionId = ?').run(sessionId)
     this.db.prepare('DELETE FROM events WHERE sessionId = ?').run(sessionId)
+    this.refusalCache.clear()
   }
 
   /**
@@ -1416,6 +1517,24 @@ export class Store {
    * spiral guard's answer starts depending on tool traffic rather than on how many times the work
    * went round. Asked for by type so the cap on `listEvents` never applies.
    */
+  /**
+   * Every delivery on one board that carried this task id, oldest first. See `hopsForTask`.
+   *
+   * The index is named because the planner, with no ANALYZE statistics, prefers `idx_events_type`
+   * and decodes every delivery's payload: 260 to 450 ms on the 24 September copy, against 1 to 2 ms
+   * through `idx_events_mail_task`.
+   */
+  mailDeliveredForTask(projectId: string, taskId: string): AgentEvent[] {
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM events INDEXED BY idx_events_mail_task ' +
+          "WHERE type = 'MailDelivered' AND json_extract(payload, '$.taskId') = ? " +
+          'AND sessionId IN (SELECT id FROM sessions WHERE projectId = ?) ORDER BY ts',
+      )
+      .all(taskId, projectId) as any[]
+    return rows.map(hydrateEvent)
+  }
+
   listMailDelivered(sessionId: string): AgentEvent[] {
     const rows = this.db
       .prepare("SELECT * FROM events WHERE sessionId = ? AND type = 'MailDelivered' ORDER BY ts")
@@ -1436,6 +1555,14 @@ export class Store {
             .prepare('SELECT 1 FROM events WHERE ts >= ? AND sessionId != ? LIMIT 1')
             .get(ts, except ?? '')
     return row !== undefined
+  }
+
+  /** The newest event of one type for one card at or after `ts`, or undefined. One indexed lookup. */
+  lastEventOfTypeSince(sessionId: string, type: string, ts: number): AgentEvent | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM events WHERE sessionId = ? AND ts >= ? AND type = ? ORDER BY ts DESC LIMIT 1')
+      .get(sessionId, ts, type) as any
+    return row ? hydrateEvent(row) : undefined
   }
 
   /** Events from one turn, matched on the prompt id the CLI puts on every payload. */
@@ -1518,6 +1645,7 @@ export class Store {
     const info = this.db
       .prepare('DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < ? LIMIT ?)')
       .run(cutoff, batch)
+    if (info.changes) this.refusalCache.clear()
     return info.changes
   }
 
@@ -1526,6 +1654,107 @@ export class Store {
       INSERT INTO events (id,sessionId,ts,type,provenance,payload)
       VALUES (@id,@sessionId,@ts,@type,@provenance,@payload)
     `).run({ ...e, payload: JSON.stringify(e.payload) })
+    if (REFUSAL_TYPES.has(e.type)) this.refusalCache.clear()
+  }
+
+  // --- unread mail ---
+
+  /** Record that a card has one more message it has not been told about. */
+  addPendingMail(m: {
+    sessionId: string
+    fromTitle: string
+    kind: string | null
+    taskId: string | null
+    at: number
+    inboxOffset: number
+  }): void {
+    this.db.prepare(`
+      INSERT INTO mail_pending (id,sessionId,fromTitle,kind,taskId,at,inboxOffset)
+      VALUES (@id,@sessionId,@fromTitle,@kind,@taskId,@at,@inboxOffset)
+    `).run({ ...m, id: randomUUID() })
+  }
+
+  /**
+   * Every card holding unread mail, with its count and its read marker.
+   *
+   * Read at boot to put the badges back. The offset returned is the SMALLEST still pending, because
+   * that is the first byte the card has not seen; the later ones are only there so the count is a
+   * count of messages rather than of wake attempts.
+   */
+  pendingMailByCard(): { sessionId: string; count: number; inboxOffset: number; oldestAt: number }[] {
+    return this.db
+      .prepare(`
+        SELECT sessionId, COUNT(*) AS count, MIN(inboxOffset) AS inboxOffset, MIN(at) AS oldestAt
+        FROM mail_pending GROUP BY sessionId
+      `)
+      .all() as { sessionId: string; count: number; inboxOffset: number; oldestAt: number }[]
+  }
+
+  /** One card's unread count and read marker, or null when it is holding nothing. */
+  pendingMailFor(sessionId: string): { count: number; inboxOffset: number } | null {
+    const r = this.db
+      .prepare('SELECT COUNT(*) AS count, MIN(inboxOffset) AS inboxOffset FROM mail_pending WHERE sessionId = ?')
+      .get(sessionId) as { count: number; inboxOffset: number | null }
+    return r && r.count > 0 ? { count: r.count, inboxOffset: r.inboxOffset ?? 0 } : null
+  }
+
+  /** The card has now been told. Returns how many messages that covered. */
+  clearPendingMail(sessionId: string): number {
+    return this.db.prepare('DELETE FROM mail_pending WHERE sessionId = ?').run(sessionId).changes
+  }
+
+  // --- findings (the watchdog) ---
+
+  /** The live finding for this kind and subject: open, handled or escalated, never resolved or dismissed. */
+  liveFinding(kind: string, subject: string): Finding | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM findings WHERE kind = ? AND subject = ? AND state IN ('open','handled','escalated')`)
+      .get(kind, subject) as any
+    return row ? hydrateFinding(row) : undefined
+  }
+
+  /** Every finding still live, newest first. */
+  liveFindings(): Finding[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM findings WHERE state IN ('open','handled','escalated') ORDER BY lastSeen DESC`)
+        .all() as any[]
+    ).map(hydrateFinding)
+  }
+
+  /** What was done lately: findings with a note, newest first, whatever their state now. */
+  notedFindings(limit: number): Finding[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM findings WHERE note IS NOT NULL AND note != '' ORDER BY lastSeen DESC LIMIT ?`)
+        .all(limit) as any[]
+    ).map(hydrateFinding)
+  }
+
+  getFinding(id: string): Finding | undefined {
+    const row = this.db.prepare('SELECT * FROM findings WHERE id = ?').get(id) as any
+    return row ? hydrateFinding(row) : undefined
+  }
+
+  putFinding(f: Finding): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO findings (id,kind,subject,projectId,severity,title,detail,evidence,state,firstSeen,lastSeen,count,note,resolvedAt)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        f.id, f.kind, f.subject, f.projectId, f.severity, f.title, f.detail,
+        f.evidence == null ? null : JSON.stringify(f.evidence),
+        f.state, f.firstSeen, f.lastSeen, f.count, f.note, f.resolvedAt,
+      )
+  }
+
+  /**
+   * Fold the WAL back into the database, which is safe on a live board: it copies committed pages
+   * and cannot lose anything. `VACUUM` is the one that is not, and it is never run from here.
+   */
+  checkpoint(): void {
+    this.db.pragma('wal_checkpoint(TRUNCATE)')
   }
 
   // --- transcript archive ---
@@ -1684,6 +1913,13 @@ function hydrateTask(row: any): TaskContract {
 
 function hydrateReassignment(row: any): TaskReassignment {
   return { ...row }
+}
+
+function hydrateFinding(row: any): Finding {
+  return {
+    ...row,
+    evidence: row.evidence ? JSON.parse(row.evidence) : null,
+  }
 }
 
 function hydrateWire(row: any): Wire {

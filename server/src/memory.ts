@@ -67,7 +67,7 @@ const NOTES_HEADER = `# Notes
 Working notes for this card: what it is responsible for, where the relevant code lives, and
 anything a future run should not have to rediscover.
 
-This file is read at the start of a task and is meant to stay short. Long-form records of
+Open this when you pick a task back up, and keep it to the current picture. Long-form records of
 individual pieces of work belong in the history directory, not here.
 `
 
@@ -114,12 +114,28 @@ export function ensureMemory(dir: string): { lessons: string; notes: string; pla
 const OWN_MARK = '<!-- Below this line is yours. Garden never rewrites it. -->'
 
 /**
+ * What a card with no reporting line is told, here and in its `POWERS.md`.
+ *
+ * Only the orchestrator answers to the owner by design. Any other card without a line was either
+ * made by the owner's own hand, and he is the one talking to it, or hired without `--reports-to`,
+ * and then its brief names the card it reports to. This sentence is true of both. It used to tell
+ * every such card that it answered to the owner and that nobody on the board was above it, while
+ * four hired briefs further down the same file named the card they reported to (canon 12).
+ */
+export function noReportingLine(roleClass: string | null): string {
+  return roleClass === 'orchestrator'
+    ? 'You answer to the owner directly. Nobody else on this board is above you.'
+    : 'No reporting line is set on this card. If your brief names who you report to, report there; ' +
+        'otherwise you answer to the owner directly.'
+}
+
+/**
  * The card's own CLAUDE.md: what it is, what it may do, and its job on this team.
  *
  * Every card gets one, because a session with no instructions of its own reads only the project's
- * and behaves like every other session in the project, which is the opposite of a team. This is the
- * file the CLI picks up on its own, so it is the one place a role can be stated where the agent
- * will actually see it without anybody pasting it into a prompt.
+ * and behaves like every other session in the project, which is the opposite of a team. The CLI does
+ * not find it on its own: the whole file, both halves, reaches the session through
+ * `--append-system-prompt-file` (see `briefArg` in adapters.ts).
  *
  * The powers section is quoted from the same table that writes the deny list into the settings
  * file, so a brief can never describe a restriction that was not written.
@@ -168,22 +184,27 @@ export function writeCardBrief(
 
   if (role && card.roleClass) {
     lines.push(`You are the **${card.roleClass}**: ${role.summary}.`, '', role.enforced, '')
-    lines.push(`Denied by the CLI, so these will refuse rather than fail quietly: ${role.denies.join(', ')}.`, '')
+    lines.push(
+      role.denies.length
+        ? `Denied by the CLI, so these will refuse rather than fail quietly: ${role.denies.join(', ')}.`
+        : 'Nothing is denied to you by the CLI.',
+      '',
+    )
   } else {
-    lines.push('No role has been set for this card, so nothing is denied to it and nothing is expected of it', 'beyond what you ask directly.', '')
+    lines.push('No role has been set for this card, so nothing is denied to you and nothing is expected of you', 'beyond what you are asked directly.', '')
   }
 
   lines.push('## Where you sit', '')
   lines.push(
     answersTo
       ? `You answer to **${answersTo}**. Report what you finish to that card and nowhere else.`
-      : 'You answer to the owner directly. Nobody else on this board is above you.',
+      : noReportingLine(card.roleClass),
     '',
   )
-  if (!card.canSpawnAgents || card.teamSize === 0) {
-    lines.push('You may not hire anyone, so the work you are given is yours to do.', '')
+  if (!card.canSpawnAgents || card.teamSize === 0 || role?.denies.includes('Agent')) {
+    lines.push('You may not spawn subagents, so the work you are given is yours to do.', '')
   } else if (card.teamSize) {
-    lines.push(`Keep to about ${card.teamSize} helper${card.teamSize === 1 ? '' : 's'} at a time.`, '')
+    lines.push(`Keep to about ${card.teamSize} subagent${card.teamSize === 1 ? '' : 's'} at a time.`, '')
   }
   lines.push(
     'Who you may actually send to is in `PEERS.md` beside this file, and it is not advice: a wire on',

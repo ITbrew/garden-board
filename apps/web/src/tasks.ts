@@ -169,6 +169,26 @@ function readIdentity(value: 'owner' | 'guest' | { cardId: string }): Identity {
  */
 const REFUSAL_CAP = 200
 
+/**
+ * How many messages each card has not been told about, keyed by card id.
+ *
+ * Here rather than in `state.ts` for the same reason refusals are: this file already holds the
+ * board facts that hang off a card without being columns on it, and `Canvas` already reads it.
+ *
+ * Absent means none. The server leaves a card out rather than sending a zero, and a zero on a
+ * `mail.unread` message deletes the entry, so an emptied mailbox and a card that never had one are
+ * the same state here, which is what the badge wants.
+ */
+let unread = new Map<string, number>()
+
+export function unreadFor(sessionId: string): number {
+  return unread.get(sessionId) ?? 0
+}
+
+function takeUnread(counts: Record<string, number>) {
+  unread = new Map(Object.entries(counts).filter(([, n]) => n > 0))
+}
+
 function takeRefusals(rows: AgentEvent[]) {
   refusals = rows.filter(isRefusal).sort((a, b) => b.ts - a.ts).slice(0, REFUSAL_CAP)
 }
@@ -211,6 +231,9 @@ conn.on((msg: ServerMessage) => {
        * board has recorded none when the truth is that nobody has been asked.
        */
       if (Array.isArray(msg.refusals)) takeRefusals(msg.refusals)
+      // Guarded for the same reason as the refusals above: a server older than these types sends a
+      // snapshot without it, and reading it straight would empty every badge on a reload.
+      if (msg.unreadMail && typeof msg.unreadMail === 'object') takeUnread(msg.unreadMail)
       changed()
       return
     }
@@ -239,6 +262,14 @@ conn.on((msg: ServerMessage) => {
        * under the control afterwards would say the refusal still stands when it may not.
        */
       refusalFor.clear()
+      changed()
+      return
+    }
+
+    /* One card's count changed, so a board already open moves without waiting for a reload. */
+    case 'mail.unread': {
+      if (msg.count > 0) unread.set(msg.sessionId, msg.count)
+      else unread.delete(msg.sessionId)
       changed()
       return
     }

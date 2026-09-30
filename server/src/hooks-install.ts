@@ -11,7 +11,7 @@
  * rather than replacing them, and it lives entirely inside `~/.garden`. Removing Garden removes
  * every trace of this.
  */
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DATA_DIR } from './store.js'
@@ -146,12 +146,35 @@ export interface SessionPowers {
   effort?: string | null
 }
 
+/**
+ * The permission mode a card opens in, from the choice made at first launch. Canon 01 revision 3.
+ *
+ * `never-ask` is bypass mode, which the owner chose ("fewer approval prompts and runs as admin").
+ * Anything else, including no `setup.json` at all, is auto mode, which is what every board had before
+ * the choice existed. The deny list built above applies in both.
+ */
+export function approvalMode(): 'auto' | 'bypassPermissions' {
+  try {
+    const setup = JSON.parse(readFileSync(join(DATA_DIR, 'setup.json'), 'utf8')) as { approvals?: string }
+    return setup.approvals === 'never-ask' ? 'bypassPermissions' : 'auto'
+  } catch {
+    return 'auto'
+  }
+}
+
 export function buildHookSettings(port: number, powers?: SessionPowers): unknown {
   // Forward slashes so the JSON needs no escaping and the command reads the same on any shell.
   const command = `node "${hookScriptPath().replace(/\\/g, '/')}"`
   const hooks: Record<string, unknown[]> = {}
+  /*
+   * The CLI's ceiling, not the hook's budget: the hook ends itself about a second and a half after it
+   * starts. It was 5 s, and on 23 September, with the processor held at 15% of its speed and Defender
+   * scanning each launch, node alone took up to 2.5 s to start and the whole hook 2.5 to 3.9 s, so the
+   * CLI killed it: .5Orche2's UserPromptSubmit never reached Garden, which then pressed Enter three
+   * times into a working card and raised a false enter-gave-up.
+   */
   for (const event of EVENTS) {
-    const entry: Record<string, unknown> = { hooks: [{ type: 'command', command, timeout: 5 }] }
+    const entry: Record<string, unknown> = { hooks: [{ type: 'command', command, timeout: 30 }] }
     if (!MATCHERLESS.has(event)) entry.matcher = '.*'
     hooks[event] = [entry]
   }
@@ -224,8 +247,9 @@ export function buildHookSettings(port: number, powers?: SessionPowers): unknown
   const shim = sendShimPath().replace(/\\/g, '/')
   const hire = hireShimPath().replace(/\\/g, '/')
   const taskShim = taskShimPath().replace(/\\/g, '/')
+  const mode = approvalMode()
   const permissions: Record<string, unknown> = {
-    defaultMode: 'auto',
+    defaultMode: mode,
     /*
      * The hire shim is allowed by name for the same reason the send shim is. A card that has to
      * stop and ask the owner before it may even ask for a card is a card the owner has to babysit,
@@ -290,6 +314,12 @@ export function buildHookSettings(port: number, powers?: SessionPowers): unknown
     hooks,
     env,
     permissions,
+    /*
+     * Bypass mode stops on an "accept responsibility" screen the first time an account starts in it,
+     * and a card has nobody at its keyboard to accept, so it would sit there. The owner accepted it
+     * once for every card by choosing no approval prompts at first launch (canon 01 revision 3).
+     */
+    ...(mode === 'bypassPermissions' ? { skipDangerousModePermissionPrompt: true } : {}),
     claudeMdExcludes: CLAUDE_MD_EXCLUDES,
     /*
      * The CLI's own auto-memory, off, and it is the same argument as the excludes above.

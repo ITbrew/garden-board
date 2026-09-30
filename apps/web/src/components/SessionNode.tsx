@@ -10,11 +10,15 @@ import {
   type TerminalSession,
   type Project,
 } from '@garden/shared'
+import { getPreviewLive, onPreviewChange } from '../preview'
+import { pastedImage, saveImage, typedPath } from '../paste-image'
 import { actions, onSessionBytes, useApp } from '../state'
 import { heldTask, onTasks } from '../tasks'
 import { SubagentList, type ListEntry } from './SubagentList'
 import { TerminalMini } from './TerminalMini'
 import { AgentChat } from './AgentChat'
+import { ClaudeTerminal } from './ClaudeTerminal'
+import { OverseerView } from './OverseerView'
 
 /**
  * The default colour of a card, by which CLI it runs. A card can override it, which is how roles
@@ -157,10 +161,12 @@ export type SessionNodeData = {
    * the fact that they exist. Canon 15: a refusal is never silent, and a fold is not an exception.
    */
   refusalCount: number
+  /** Messages filed to this card that nothing has told it about. Zero means none. */
+  unreadMail: number
 }
 
 export const SessionNode = memo(function SessionNode({ data, selected }: NodeProps) {
-  const { session, project, account, focused, width, height, contextOpen, historyOpen, refusalCount } =
+  const { session, project, account, focused, width, height, contextOpen, historyOpen, refusalCount, unreadMail } =
     data as SessionNodeData
   const [powersOpen, setPowersOpen] = useState(false)
   /*
@@ -358,6 +364,22 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
         ? [modelBit, effortBit].filter(Boolean).join(' · ')
         : [hiringBit, modelBit, effortBit, roleBit].filter(Boolean).join(' · ')
   const [line, setLine] = useState('')
+  /*
+   * What sits unsent in the CLI's own prompt on a running Claude card, typed in the dock pane. The card
+   * does not draw the CLI's prompt box, so this is shown in the card's one input line instead of in a
+   * second box above it. Canon 02 revision 14.
+   */
+  const mirrorsDraft = session.kind === 'session' && session.adapterId === 'claude' && !off
+  const [draft, setDraft] = useState<string | null>(null)
+  useEffect(() => {
+    if (!mirrorsDraft) {
+      setDraft(null)
+      return
+    }
+    const read = () => setDraft(getPreviewLive(session.id).draft)
+    read()
+    return onPreviewChange(session.id, read)
+  }, [session.id, mirrorsDraft])
   const collapsed = session.collapsed
   useTicker(session.status === 'needs-input', 15000)
 
@@ -378,38 +400,15 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
    * is still a heuristic, and it is the reason the box says the line is waiting instead of
    * pretending it has been delivered.
    */
+  /*
+   * Shown in the box while the line waits for the card to come up. The server holds the line now and
+   * types it once the CLI reports its session loaded, so this is only the notice, cleared the moment
+   * the card is seen doing something with it.
+   */
   const [pending, setPending] = useState<string | null>(null)
   useEffect(() => {
-    if (pending == null || off) return
-    let quiet: ReturnType<typeof setTimeout> | undefined
-    const send = () => {
-      sendLine(session.id, pending)
-      setPending(null)
-    }
-    /*
-     * Arm the timer now, not only when a byte arrives.
-     *
-     * Waiting for the stream to go quiet is right, but "quiet" was only ever measured from the
-     * first byte this listener happened to see. A session that printed its opening and settled
-     * before the listener attached produced no byte at all, so nothing started the clock and the
-     * held line was never sent: the very first message to a switched-off card silently vanished
-     * while every follow-up worked, because by then the card was running and took input directly.
-     *
-     * So there are two clocks. The long one covers a stream that is already silent. Every byte
-     * replaces it with the short one, which is the original behaviour: a CLI that is still drawing
-     * keeps pushing the send back until it stops.
-     */
-    const arm = (ms: number) => {
-      if (quiet) clearTimeout(quiet)
-      quiet = setTimeout(send, ms)
-    }
-    arm(4000)
-    const stop = onSessionBytes(session.id, () => arm(700))
-    return () => {
-      if (quiet) clearTimeout(quiet)
-      stop()
-    }
-  }, [pending, off, session.id])
+    if (pending != null && session.status === 'working') setPending(null)
+  }, [pending, session.status])
 
   /*
    * The agent's own conversation, where a session card has its terminal.
@@ -427,12 +426,24 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
    *
    * The stored choice wins, and the default is the card's kind. A subagent or teammate card has no
    * process behind it and never had a terminal to show, so it opens on the conversation; a session
-   * card opens on its terminal, which is what it has always done. What is new is that a session card
-   * can now be turned round: the conversation is read from the CLI's own transcript, so it says what
+   * card can be turned round: the conversation is read from the CLI's own transcript, so it says what
    * was asked and answered in words, it survives the process ending and the app restarting, and it
    * is not a picture of drawing instructions that a resize can scramble.
+   *
+   * **A Claude card opens on its terminal**, like every session card. It opened on its conversation
+   * for part of 2026-09-29 and the owner turned that down: "i dont like the conversational view. i
+   * want the terminal view to be sscrollable". The terminal scrolls by handing the wheel to the CLI
+   * (TerminalMini), and the conversation stays one press away on the toggle. Canon 02 revision 12.
    */
   const showChat = session.bodyView ? session.bodyView === 'chat' : isAgent
+
+  /*
+   * The Keeper's card is the overseer card (canon 27, "The overseer card"): drawn in its own style
+   * and opened on what the overseer is doing, with its terminal one press away. Kept in the page,
+   * not stored, so it always opens on the overview.
+   */
+  const isOverseer = !isAgent && session.title === 'Keeper'
+  const [overseerTerm, setOverseerTerm] = useState(false)
 
   /**
    * Whether this card can have a conversation at all, which decides whether the toggle is drawn.
@@ -503,7 +514,7 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
        * this landed, which is the opposite of what was asked. So the class is the signal, the
        * property is the value, and a card the owner has never coloured looks exactly as it did.
        */
-      className={`node ${selected ? 'is-selected' : ''} ${focused ? 'is-focused' : ''} ${off ? 'is-off' : ''} ${session.status === 'working' ? 'is-busy' : ''} ${session.color ? 'is-tinted' : ''}`}
+      className={`node ${selected ? 'is-selected' : ''} ${focused ? 'is-focused' : ''} ${off ? 'is-off' : ''} ${session.status === 'working' ? 'is-busy' : ''} ${session.color ? 'is-tinted' : ''} ${isOverseer ? 'is-overseer' : ''}`}
       style={
         {
           width,
@@ -558,8 +569,9 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
         <span className={`dot dot--${session.status}`} />
         {/* The title must always stay readable: min-width:0 is what lets it actually shrink
             inside the flex row rather than being shoved out by the status pill next to it. */}
-        <span className="node-title" title={session.title}>
-          {session.title}
+        <span className="node-title" title={isOverseer ? 'The overseer (the card titled Keeper): watches the board and fixes what it safely can' : session.title}>
+          {isOverseer && <span className="node-title__eye" aria-hidden>◉</span>}
+          {isOverseer ? 'Overseer' : session.title}
         </span>
         {/*
           What this card is accountable for, beside what it is doing.
@@ -610,7 +622,16 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
           pressing it gives you rather than with what is showing, since a toggle that names its own
           current state reads as a status and gets pressed by mistake.
         */}
-        {canConverse && (
+        {isOverseer && (
+          <button
+            className={`twisty twisty--word nodrag ${overseerTerm ? 'twisty--on' : ''}`}
+            title={overseerTerm ? 'Showing its terminal. Press to go back to the overview.' : 'Show the Keeper’s terminal'}
+            onClick={() => setOverseerTerm((v) => !v)}
+          >
+            {overseerTerm ? 'overview' : 'terminal'}
+          </button>
+        )}
+        {canConverse && !(isOverseer && !overseerTerm) && (
           <button
             className={`twisty twisty--word nodrag ${showChat ? 'twisty--on' : ''}`}
             title={
@@ -673,6 +694,30 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
           {session.statusSince != null && (
             <span className="node-alert__since">waiting {formatWait(Date.now() - session.statusSince)}</span>
           )}
+        </div>
+      )}
+
+      {/*
+        Mail nobody has told this card about.
+
+        Its own row, under the needs-you banner and above everything else, and shown while collapsed
+        for the same reason that one is: the whole failure this exists to end was invisible. Messages
+        were filed, nothing woke the card, and a card holding sixty of them looked exactly like a
+        card holding none. The owner read that for weeks as mail being silently dropped.
+
+        A count and not a list. Which messages they are is in the card's own INBOX.md, and the card
+        is handed them when it next starts; what the board has to answer is only "is anything
+        waiting here", which is the question that had no answer at all.
+      */}
+      {unreadMail > 0 && (
+        <div
+          className="node-unread"
+          title={`${unreadMail} message${unreadMail === 1 ? '' : 's'} in this card's INBOX.md that nothing has told it about. Start the card and it is handed them.`}
+        >
+          <span className="node-unread__headline">unread mail</span>
+          <span className="node-unread__count">
+            {unreadMail} message{unreadMail === 1 ? '' : 's'} waiting
+          </span>
         </div>
       )}
 
@@ -1090,7 +1135,9 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
             conversation would have grown the pane until it pushed the line below it off the bottom
             of the card.
           */}
-          {showChat ? (
+          {isOverseer && !overseerTerm ? (
+            <OverseerView />
+          ) : showChat ? (
             <AgentChat
               sessionId={session.id}
               transcriptPath={session.transcriptPath}
@@ -1098,6 +1145,21 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
               exitedAt={session.exitedAt}
               formatWhen={formatWhen}
             />
+          ) : canConverse ? (
+            // A Claude card's terminal is its conversation in terminal type, scrolling on its own,
+            // with the CLI's live lines under it. Canon 02 revision 13.
+            <div
+              className="mini-wrap"
+              title="Double-click to make this card bigger"
+              onDoubleClick={(e) => { e.stopPropagation(); actions.toggleSessionSize(session.id) }}
+            >
+              <ClaudeTerminal
+                sessionId={session.id}
+                transcriptPath={session.transcriptPath}
+                status={session.status}
+                live={!off}
+              />
+            </div>
           ) : (
             // Double-click grows the card: its own size, then a working size, then the workspace.
             <div
@@ -1105,7 +1167,7 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
               title="Double-click to make this card bigger"
               onDoubleClick={(e) => { e.stopPropagation(); actions.toggleSessionSize(session.id) }}
             >
-              <TerminalMini sessionId={session.id} everRan={session.exitedAt !== null} />
+              <TerminalMini sessionId={session.id} everRan={session.exitedAt !== null} live={!off} />
             </div>
           )}
 
@@ -1240,6 +1302,7 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
                 if (off) {
                   if (!line) return
                   actions.startSession(session.id)
+                  actions.line(session.id, line)
                   setPending(line)
                   setLine('')
                   return
@@ -1250,7 +1313,8 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
                   actions.input(session.id, CR)
                   return
                 }
-                sendLine(session.id, line)
+                // A whole line, typed by the server once the CLI can take it and confirmed by its submit.
+                actions.line(session.id, line)
                 setLine('')
               }}
             >
@@ -1258,16 +1322,30 @@ export const SessionNode = memo(function SessionNode({ data, selected }: NodePro
               <input
                 value={line}
                 onChange={(e) => setLine(e.target.value)}
+                // A screenshot on the clipboard pastes its saved path at the caret. Canon 03.
+                onPaste={(e) => {
+                  const file = pastedImage(e)
+                  if (!file) return
+                  e.preventDefault()
+                  const el = e.currentTarget
+                  const at = el.selectionStart ?? line.length
+                  const to = el.selectionEnd ?? at
+                  void saveImage(file).then((path) => {
+                    if (!path) return
+                    setLine((cur) => cur.slice(0, at) + typedPath(path) + cur.slice(to))
+                  })
+                }}
                 placeholder={
                   pending != null
                     ? 'starting, your line is waiting…'
                     : off
                       ? 'type here to start this session'
-                      : 'type into this terminal'
+                      : draft
+                        ? draft
+                        : 'type into this terminal'
                 }
-                // Only ever disabled while a line is already queued, so a second one cannot be
-                // typed into a session that has nowhere to put the first.
-                disabled={pending != null}
+                // The draft is his text, typed in the pane, so it reads as text rather than as a hint.
+                className={!line && draft && pending == null && !off ? 'node-input__mirror' : undefined}
                 spellCheck={false}
                 title={
                   off

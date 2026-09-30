@@ -139,9 +139,12 @@ check(
   b.of('Put down')?.pid == null,
   `pid ${b.of('Put down')?.pid ?? 'none'}`,
 )
+// Reversed 2026-09-29: "i want restarting session to bring back all sessions that were alive before
+// reset". The idle card was left down on purpose until then; now it comes back like the rest.
+// Canon 03 revision 14.
 check(
-  'and the card that was only sitting there is left down, deliberately',
-  b.of('Idle')?.pid == null,
+  'and the card that was only sitting there comes back too',
+  b.of('Idle')?.pid != null,
   `pid ${b.of('Idle')?.pid ?? 'none'}, status ${b.of('Idle')?.status}`,
 )
 

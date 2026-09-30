@@ -1,6 +1,6 @@
 {
   "name": "garden",
-  "version": "1.1.18",
+  "version": "1.1.79",
   "private": true,
   "description": "A node-graph control room for AI CLI sessions",
   "workspaces": [
@@ -21,7 +21,8 @@
     "typecheck": "tsc -b packages/shared server apps/web",
     "prepare": "git config core.hooksPath .githooks",
     "check": "node scripts/check-no-live-board.mjs && node scripts/check-no-secrets.mjs --all && npm run typecheck",
-    "test": "node scripts/run-suite.mjs"
+    "test": "node scripts/run-suite.mjs",
+    "update": "node scripts/garden-update.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

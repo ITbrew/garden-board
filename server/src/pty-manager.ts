@@ -2,8 +2,16 @@ import * as pty from 'node-pty'
 import { EventEmitter } from 'node:events'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import headless from '@xterm/headless'
+import serializeAddon from '@xterm/addon-serialize'
 import type { LaunchSpec } from './adapters.js'
 import { DATA_DIR } from './store.js'
+
+/**
+ * Lines of history the server's copy of a screen keeps above it, matching the dock terminal's own
+ * scrollback so a pane rebuilt from a snapshot can scroll back as far as one that saw every byte.
+ */
+const SCREEN_SCROLLBACK = 5000
 
 /**
  * Scrollback kept per session so a node can be drawn as a preview, evicted, and later re-mounted
@@ -44,6 +52,8 @@ const SCROLLBACK_SLACK = SCROLLBACK_LIMIT / 2
  * what can hold the answer is the right shape, not because it bought back any time.
  */
 const TOKEN_TAIL_BYTES = 32 * 1024
+/** How much of the bottom `tail` keeps on its own; every reader asks for less. */
+const TAIL_KEEP = 64 * 1024
 
 /**
  * The grid a session is spawned with, named rather than left as defaults on one function.
@@ -134,6 +144,8 @@ interface Live {
   /** True once Garden killed this on purpose, so the exit reads as stopped rather than failed. */
   intentional: boolean
   buffer: string
+  /** The last TAIL_KEEP to 2x TAIL_KEEP characters of `buffer`, kept apart so reading the bottom is cheap. */
+  tail: string
   /** Cumulative bytes emitted, used so a terminal attaching late can dedupe against scrollback. */
   seq: number
   cols: number
@@ -143,6 +155,75 @@ interface Live {
   /** When anything was last written into this pty, and when that write last carried a return. */
   lastWriteAt?: number
   lastSubmitAt?: number
+  /** The mouse reporting mode (9, 1000, 1002 or 1003) and encoding (1006 or 1016) switched on, 0 for none. */
+  mouseProtocol: number
+  mouseEncoding: number
+  /** The start of a mode switch cut off by the end of the last chunk, finished by the next. */
+  modeCarry: string
+  /**
+   * The screen as the program has drawn it, kept by a headless terminal fed every byte at the
+   * process's own size. A snapshot is this, serialized, rather than the tail of `buffer`: a program
+   * that draws part of its screen once and then repaints only the rest lost that part from the tail.
+   * Canon 03 revision 17.
+   */
+  screen: InstanceType<typeof headless.Terminal>
+  serializer: InstanceType<typeof serializeAddon.SerializeAddon>
+  /** Bytes the headless terminal has finished parsing, the seq a serialized snapshot stands at. */
+  parsedSeq: number
+}
+
+/**
+ * The mouse modes a running program has switched on, followed from its own output.
+ *
+ * A terminal sends a program mouse reports only if it has seen the program ask, and the history a
+ * page is handed is the last 256 KB. A CLI that asked for the mouse an hour and several megabytes ago
+ * has pushed that request out of the window, so a page loaded now would never hand it the wheel, and
+ * neither would its dock. `scrollback` says the current modes again after the bytes. Every switch the
+ * program made passed through here, so that is exactly what it last asked for. Canon 02 revision 12.
+ *
+ * Followed the way xterm follows them, so the answer matches a terminal that saw the whole stream:
+ * one reporting mode at a time, switching any of them off turns reporting off, 1006 or 1016 picks
+ * the encoding until switched off, and a full reset clears both.
+ */
+const MOUSE_PROTOCOLS = new Set([9, 1000, 1002, 1003])
+const MOUSE_ENCODINGS = new Set([1006, 1016])
+const MODE_SWITCH = /\x1b\[\?([\d;]+)([hl])|\x1bc/g
+const MODE_SWITCH_CUT = /\x1b(\[(\?[\d;]*)?)?$/
+
+function followMouse(entry: Live, data: string): void {
+  const text = entry.modeCarry + data
+  for (const m of text.matchAll(MODE_SWITCH)) {
+    if (m[0] === '\x1bc') {
+      entry.mouseProtocol = 0
+      entry.mouseEncoding = 0
+      continue
+    }
+    const on = m[2] === 'h'
+    for (const p of m[1]!.split(';')) {
+      const n = Number(p)
+      if (MOUSE_PROTOCOLS.has(n)) entry.mouseProtocol = on ? n : 0
+      else if (MOUSE_ENCODINGS.has(n)) entry.mouseEncoding = on ? n : 0
+    }
+  }
+  entry.modeCarry = MODE_SWITCH_CUT.exec(text)?.[0] ?? ''
+}
+
+function mouseModes(entry: Live): string {
+  return (
+    (entry.mouseProtocol ? `\x1b[?${entry.mouseProtocol}h` : '') +
+    (entry.mouseEncoding ? `\x1b[?${entry.mouseEncoding}h` : '')
+  )
+}
+
+/**
+ * A mouse report as a terminal writes it to a program: `ESC[<b;x;yM` (or `m`), or the older
+ * `ESC[M` and three bytes. A card or a dock pane sends one for every wheel step, and under mode 1003
+ * for every movement of the pointer, so they must not be read as the owner typing.
+ */
+const MOUSE_REPORT = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[M[\s\S]{3}/g
+
+export function onlyMouseReports(data: string): boolean {
+  return data.length > 0 && data.replace(MOUSE_REPORT, '').length === 0
 }
 
 export interface PtyExit {
@@ -227,11 +308,21 @@ export class PtyManager extends EventEmitter {
       proc,
       intentional: false,
       buffer: '',
+      tail: '',
       seq: 0,
       cols,
       rows,
       dirty: false,
+      mouseProtocol: 0,
+      mouseEncoding: 0,
+      modeCarry: '',
+      screen: new headless.Terminal({ cols, rows, scrollback: SCREEN_SCROLLBACK, allowProposedApi: true }),
+      serializer: new serializeAddon.SerializeAddon(),
+      parsedSeq: 0,
     }
+    // The addon is typed against the browser terminal and works on the headless one, which is the
+    // documented pairing; only its declared parameter type differs.
+    entry.screen.loadAddon(entry.serializer as unknown as Parameters<typeof entry.screen.loadAddon>[0])
     this.live.set(sessionId, entry)
     /*
      * Stamped at spawn as well as on every resize, because the file outlives the run that wrote it.
@@ -247,7 +338,19 @@ export class PtyManager extends EventEmitter {
 
     proc.onData((data) => {
       entry.buffer += data
+      /*
+       * A short copy of the bottom, for `tail`. Slicing the big buffer flattens every appended
+       * chunk into one string first, and a live profile on 23 September caught that at 862 ms in a
+       * single call. This copy never grows past twice TAIL_KEEP, so flattening it is cheap.
+       */
+      entry.tail += data
+      if (entry.tail.length > TAIL_KEEP * 2) entry.tail = entry.tail.slice(entry.tail.length - TAIL_KEEP)
       entry.seq += data.length
+      const through = entry.seq
+      entry.screen.write(data, () => {
+        entry.parsedSeq = through
+      })
+      followMouse(entry, data)
       if (entry.buffer.length > SCROLLBACK_LIMIT + SCROLLBACK_SLACK) {
         entry.buffer = entry.buffer.slice(entry.buffer.length - SCROLLBACK_LIMIT)
       }
@@ -259,6 +362,7 @@ export class PtyManager extends EventEmitter {
       const wasIntentional = entry.intentional
       // Last chance: after this the entry is gone, and everything the process printed with it.
       this.flush(entry)
+      entry.screen.dispose()
       this.live.delete(sessionId)
       if (this.live.size === 0) this.stopFlushTimer()
       const payload: PtyExit = { sessionId, exitCode, signal, intentional: wasIntentional }
@@ -302,7 +406,8 @@ export class PtyManager extends EventEmitter {
        * restart that throws away something the owner was in the middle of writing.
        */
       const now = Date.now()
-      entry.lastWriteAt = now
+      // A wheel step over a card is not a keystroke, so it is not a draft either.
+      if (!onlyMouseReports(data)) entry.lastWriteAt = now
       if (data.includes('\r') || data.includes('\n')) entry.lastSubmitAt = now
       return true
     } catch {
@@ -348,6 +453,7 @@ export class PtyManager extends EventEmitter {
     }
     e.cols = cols
     e.rows = rows
+    e.screen.resize(cols, rows)
     /*
      * On disk immediately rather than with the buffer on the flush timer.
      *
@@ -391,7 +497,16 @@ export class PtyManager extends EventEmitter {
    */
   scrollback(sessionId: string): { data: string; seq: number; cols: number; rows: number } {
     const e = this.live.get(sessionId)
-    if (e) return { data: capped(e.buffer), seq: e.seq, cols: e.cols, rows: e.rows }
+    // The mouse modes go after the bytes, so whatever the window holds, they are what stands last.
+    /*
+     * The screen, serialized, standing at the bytes it has parsed. Live chunks carry the cumulative
+     * count, so the client drops those inside this snapshot and draws the rest; a chunk still being
+     * parsed here arrives after it as an ordinary live chunk. The mouse modes still go last, as they
+     * did after the raw bytes. Canon 03 revision 17.
+     */
+    if (e) {
+      return { data: e.serializer.serialize() + mouseModes(e), seq: e.parsedSeq, cols: e.screen.cols, rows: e.screen.rows }
+    }
     /*
      * The size the process was last known to be drawing at, not the size one is spawned at.
      *
@@ -410,6 +525,30 @@ export class PtyManager extends EventEmitter {
   }
 
   /**
+   * Whether the screen shows Claude's prompt box: a `>` or `❯` line between two rules, the same shape
+   * the card's preview looks for. This is how the server knows a card will take a key, instead of
+   * waiting a fixed time after SessionStart (canon 06 revision 10).
+   */
+  promptShown(sessionId: string): boolean {
+    const e = this.live.get(sessionId)
+    if (!e) return false
+    const buf = e.screen.buffer.active
+    const rows: string[] = []
+    for (let y = buf.baseY; y < buf.baseY + e.screen.rows; y++) rows.push(buf.getLine(y)?.translateToString(true).trim() ?? '')
+    const rule = (t: string | undefined) => !!t && /^[─━═╭╰]{1}[─━═]{11,}/.test(t)
+    for (let i = rows.length - 2; i > 0; i--) {
+      if (!/^(│\s*)?[>❯]/.test(rows[i]!)) continue
+      // The box may be several lines tall once text wraps in it; its top rule is within a few rows.
+      let top = false
+      for (let k = i - 1; k >= Math.max(0, i - 4) && !top; k--) top = rule(rows[k])
+      let bottom = false
+      for (let k = i + 1; k < Math.min(rows.length, i + 6) && !bottom; k++) bottom = rule(rows[k])
+      if (top && bottom) return true
+    }
+    return false
+  }
+
+  /**
    * The last stretch of what a session printed, for readers that only ever look at the bottom.
    *
    * Separate from `scrollback` on purpose. That one is what a terminal is rebuilt from and has to
@@ -419,7 +558,8 @@ export class PtyManager extends EventEmitter {
   tail(sessionId: string, bytes = TOKEN_TAIL_BYTES): string {
     const e = this.live.get(sessionId)
     if (!e) return ''
-    return e.buffer.length > bytes ? e.buffer.slice(e.buffer.length - bytes) : e.buffer
+    const from = bytes <= TAIL_KEEP ? e.tail : e.buffer
+    return from.length > bytes ? from.slice(from.length - bytes) : from
   }
 
   isLive(sessionId: string): boolean {

@@ -1,6 +1,6 @@
 import { ensureRoots } from './roots.js'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { DATA_DIR } from './store.js'
 
@@ -107,7 +107,8 @@ export function scanContext(
    */
   const roots = ensureRoots(roleClass ?? null)
   add(roots.shared, 'ALL.md (every card)', 'instructions')
-  if (roots.role) add(roots.role, `${roleClass}.md (this role)`, 'instructions')
+  // The file's own name: a boss or delegator card reads the manager's.
+  if (roots.role) add(roots.role, `${basename(roots.role)} (this role)`, 'instructions')
   if (memoryDir) {
     add(join(memoryDir, 'CLAUDE.md'), 'CLAUDE.md (this card)', 'instructions')
   }

@@ -27,18 +27,21 @@ import {
   type TaskState,
   type ReassignReason,
   type BoundaryResult,
+  type Finding,
+  type OverseerView,
 } from '@garden/shared'
 import { BUILD } from './build.js'
 import { Store } from './store.js'
-import { PtyManager } from './pty-manager.js'
+import { PtyManager, onlyMouseReports } from './pty-manager.js'
 import { getAdapter, isAdapterId } from './adapters.js'
 import { contentTypeOf, kindOf, listMarkdown, mtimeOf, readDoc, readExternalDoc, safeJoin, writeDoc, writeExternalDoc } from './docs.js'
 import { createReadStream } from 'node:fs'
 import { scanContext } from './context-web.js'
 import { ensureMemory, memoryDirFor, writeCardBrief } from './memory.js'
-import { mailDirFor, postMessage, recordSent, writePeers, writePowers, type Peer } from './mail.js'
+import { Watchdog } from './watchdog.js'
+import { clearUnreadMarker, mailDirFor, postMessage, recordSent, unreadInline, writePeers, writePowers, writeUnreadMarker, type Peer } from './mail.js'
 import { hasSubstance, historyDirFor, stamp, writeAgentHistory, writeHistory } from './history.js'
-import { readChat, renderTranscript } from './transcript.js'
+import { readChat, readChatPage, renderTranscript } from './transcript.js'
 import { reachAgent } from './agent-reach.js'
 import {
   MAIL_KINDS,
@@ -59,7 +62,7 @@ import {
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { accountForPath, defaultConfigDir, discoverAccounts, ensureConfigDir, readAccount } from './profiles.js'
-import { Ingest } from './ingest.js'
+import { Ingest, fromSubagent } from './ingest.js'
 import { ROLE_POWERS, installHooks, installSessionHooks } from './hooks-install.js'
 import { ensureRoots, ensureCardRoots } from './roots.js'
 import { conversationHeldElsewhere, runningVersionForConversation } from './cli-sessions.js'
@@ -80,7 +83,40 @@ import { derivePipeline } from './pipeline.js'
 import { deleteBoard, listBoards, readBoard, saveBoard } from './boards.js'
 import { execFile, execFileSync, spawn } from 'node:child_process'
 import { join } from 'node:path'
-import { DATA_DIR } from './store.js'
+import { DATA_DIR, DB_PATH } from './store.js'
+import { connect as netConnect } from 'node:net'
+
+/*
+ * Refuse to start while another server holds this port, before the database is opened.
+ *
+ * Opening the store runs migrations, and the lines below it mark every card exited: right for a
+ * server that is coming up after the last one died, and destructive when the last one is still
+ * running. On 2026-09-23 a card ran a bin script with `--help`, which started a second server on the
+ * live database; it cleared the process id of thirteen running cards on both boards and marked the
+ * load test's cards stopped, and only then failed to listen on 5178. The board then drew working
+ * cards as off, where pressing Start would have killed them. Asking the port first means a second
+ * server leaves before it has touched anything.
+ */
+{
+  const probePort = Number(process.env.GARDEN_PORT) || DEFAULT_PORT
+  const taken = await new Promise<boolean>((resolve) => {
+    const sock = netConnect({ host: '127.0.0.1', port: probePort })
+    const done = (v: boolean) => {
+      sock.destroy()
+      resolve(v)
+    }
+    sock.once('connect', () => done(true))
+    sock.once('error', () => done(false))
+    sock.setTimeout(1500, () => done(false))
+  })
+  if (taken) {
+    console.error(
+      `[garden] another server is already running on 127.0.0.1:${probePort}. Not starting, and the ` +
+        'database was not opened. Stop that one first, or set GARDEN_PORT for a separate instance.',
+    )
+    process.exit(1)
+  }
+}
 
 const store = new Store()
 const ptys = new PtyManager()
@@ -205,6 +241,16 @@ const PALETTE = ['#7c5cff', '#2dd4bf', '#f59e0b', '#ec4899', '#38bdf8', '#a3e635
 
 function nextColor(): string {
   return PALETTE[store.listProjects().length % PALETTE.length]!
+}
+
+/**
+ * A tab has opened: a new one goes at the right end beside +, and every page is told the order.
+ * `place` is false for a folder that was already an open tab, which keeps its place. Canon 02
+ * revision 17.
+ */
+function tabOpened(projectId: string, place: boolean) {
+  if (place) store.placeTabLast(projectId)
+  broadcast({ t: 'projects.ordered', ids: store.listProjects().map((p) => p.id) })
 }
 
 function addProject(path: string, name?: string): Project {
@@ -741,7 +787,14 @@ function taskShimPath(): string {
  * No build present is not an error. It means he is on the dev server, where Vite serves the app on
  * its own port and this route has nothing to add.
  */
-const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'apps', 'web', 'dist')
+/*
+ * `GARDEN_APP_DIR` lets a throwaway test board serve its own fresh build of the page instead of the
+ * one the live board serves, so checking a change on screen never means rebuilding the owner's copy
+ * under his running board. The live board never sets it.
+ */
+const APP_DIR = process.env.GARDEN_APP_DIR
+  ? resolve(process.env.GARDEN_APP_DIR)
+  : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'apps', 'web', 'dist')
 
 const APP_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -970,18 +1023,68 @@ const BOARD_EVENTS_ID = 'board'
  * board draws it live; stored as well as broadcast, because the page throws `event` messages away
  * and a shadow-mode list that empties on reload is not a list anybody can act on.
  */
+/**
+ * How long one (card, rule) pair of `SenderUnverified` may say the same thing before it is collapsed.
+ *
+ * Only `SenderUnverified` is throttled, and the asymmetry is the point. `TaskRefused` and
+ * `TaskWouldRefuse` follow a card doing something, so they are bounded by a card taking turns.
+ * `SenderUnverified` follows a REQUEST, and in `shadow` it is recorded and then allowed, so a
+ * process that polls is not slowed down by being unverified and has no reason to stop.
+ *
+ * Measured, not guessed: on 2026-09-22 a `garden-relay.mjs --watch 15` that had been running since
+ * 09-18 with a token from a server that no longer existed had written **96,507** of these, 66% of
+ * the whole events table, with a ~2.6 KB `reason` on every row. `garden.db` reached 385 MB with a
+ * 27.7 MB WAL, and because each one is also broadcast, the board spent its time rendering them
+ * instead of accepting keystrokes. The owner could not type into any terminal.
+ *
+ * Nothing is lost. The first in a window is recorded in full and the next one carries
+ * `repeatsSuppressed`, so the record says "this happened 1,184 times" rather than saying it 1,184
+ * times. The identical `reason` is what made the rows expensive, and it is identical per rule.
+ */
+export const UNVERIFIED_WINDOW_MS = 5 * 60 * 1000
+const unverifiedSeen = new Map<string, { at: number; suppressed: number }>()
+
+/**
+ * Exported so the throttle can be tested as itself rather than through a copy of its own rules.
+ * Returns null to drop this one, or the number of repeats that were dropped since the last kept one.
+ */
+export function unverifiedThrottle(
+  seen: Map<string, { at: number; suppressed: number }>,
+  key: string,
+  now: number,
+): number | null {
+  const prev = seen.get(key)
+  if (prev && now - prev.at < UNVERIFIED_WINDOW_MS) {
+    prev.suppressed++
+    return null
+  }
+  const suppressed = prev?.suppressed ?? 0
+  seen.set(key, { at: now, suppressed: 0 })
+  if (seen.size > 500) {
+    for (const [k, v] of seen) if (now - v.at > UNVERIFIED_WINDOW_MS) seen.delete(k)
+  }
+  return suppressed
+}
+
 function recordTaskEvent(
   sessionId: string,
   type: 'TaskRefused' | 'TaskWouldRefuse' | 'SenderUnverified',
   payload: { taskId: string | null; kind: string; rule: string; reason: string; to: string | null },
 ): void {
+  const now = Date.now()
+  let suppressed = 0
+  if (type === 'SenderUnverified') {
+    const dropped = unverifiedThrottle(unverifiedSeen, `${sessionId}|${payload.rule}`, now)
+    if (dropped === null) return
+    suppressed = dropped
+  }
   const event = {
     id: randomUUID(),
     sessionId,
-    ts: Date.now(),
+    ts: now,
     type,
     provenance: 'structured' as const,
-    payload,
+    payload: suppressed ? { ...payload, repeatsSuppressed: suppressed, windowMs: UNVERIFIED_WINDOW_MS } : payload,
   }
   store.insertEvent(event)
   broadcast({ t: 'event', event })
@@ -1015,8 +1118,19 @@ function recordTaskPlaneRefusal(
   })
 }
 
+/**
+ * `unverified` is set when `shadow` accepted a request it could not attribute, so a caller can tell
+ * the difference between "Garden knows who you are" and "Garden took your word for it".
+ *
+ * A client could not previously know. Under `shadow` an unverified request is recorded and then
+ * ALLOWED, and the reply is a plain 200, so a process whose token went stale keeps working, keeps
+ * being unverified, and has no reason to stop. On 2026-09-22 that was a relay polling every 15
+ * seconds for five days. The process cannot fix itself, because its token comes from its
+ * environment at startup and the server mints new ones on every restart, so the only useful thing
+ * it can do is say so and exit. It needs to be told first.
+ */
 type SenderResolution =
-  | { ok: true; card: TerminalSession }
+  | { ok: true; card: TerminalSession; unverified?: boolean }
   | { ok: false; code: number; reason: string }
 
 /**
@@ -1119,7 +1233,11 @@ function resolveSender(req: IncomingMessage, body: any): SenderResolution {
     reason,
     to: null,
   })
-  return { ok: true, card: candidate }
+  // `offered` only: a request with no token at all is the ordinary case for a card started before
+  // tokens existed and for a shim run by hand, and telling those to stop would be wrong. A token
+  // that was OFFERED and is not recognised is a process carrying a secret from a server that no
+  // longer exists, and it will carry it until it is restarted.
+  return { ok: true, card: candidate, unverified: Boolean(offered) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1560,6 +1678,10 @@ function stateMessage(): ServerMessage {
      * the load message.
      */
     refusals: store.listProjects().flatMap((p) => store.listTaskRefusals(p.id, 200)),
+    unreadMail: Object.fromEntries(mailWaiting),
+    findings: store.liveFindings(),
+    keeper: keeperState(),
+    overseer: overseerView(),
   }
 }
 
@@ -2673,6 +2795,80 @@ function resumeIdFor(s: TerminalSession): string | null {
 const mailWaiting = new Map<string, number>()
 
 /**
+ * Cards whose unread count came back from the database at boot rather than from a live send.
+ *
+ * The distinction is the whole reason the restored count is safe to have. `flushMailWake` starts a
+ * card that has no process, because a message sent while the board is up should reach its recipient
+ * without the owner in the loop. Replaying that at startup would mean every card holding mail gets
+ * a CLI launched for it the moment the board comes back: twenty-three of them, the day this was
+ * written, on a board the owner had deliberately left switched off.
+ *
+ * So a restored card shows its badge and is handed its backlog when it is next started BY SOMEBODY,
+ * and nothing here starts it. A new message clears the mark, because that one did arrive live and
+ * the ordinary rule applies to it.
+ */
+const mailRestored = new Set<string>()
+
+/**
+ * File a message and remember that the card has not been told about it yet.
+ *
+ * Every path that writes to an inbox goes through here rather than calling `postMessage` directly.
+ * The unread count used to live only in the map above, so a board restart zeroed every badge while
+ * the messages sat in the files, and mail looked like it was vanishing. The row and the marker are
+ * what survive that.
+ */
+function fileMail(
+  to: TerminalSession,
+  fromTitle: string,
+  text: string,
+  meta: { kind?: string; taskId?: string | null; fromId?: string } = {},
+): void {
+  const { offset } = postMessage(to, fromTitle, text, meta)
+  store.addPendingMail({
+    sessionId: to.id,
+    fromTitle,
+    kind: meta.kind ?? null,
+    taskId: meta.taskId ?? null,
+    at: Date.now(),
+    inboxOffset: offset,
+  })
+  // Live mail, so the ordinary wake rules apply to this card again even if it was restored at boot.
+  mailRestored.delete(to.id)
+  const pending = store.pendingMailFor(to.id)
+  if (pending) writeUnreadMarker(to.id, { count: pending.count, offset: pending.inboxOffset })
+  /*
+   * The count is raised here, where the message is filed, rather than in `wakeForMail`.
+   *
+   * Two reasons. A closed card is filed to and deliberately never woken, so counting in the wake
+   * would leave the one card guaranteed to be holding mail showing nothing. And the announcement
+   * below has to read a count that already includes this message, which it could not if the raise
+   * happened in a call that comes after it.
+   */
+  mailWaiting.set(to.id, (mailWaiting.get(to.id) ?? 0) + 1)
+  announceUnread(to.id)
+}
+
+/**
+ * Put this card's unread count on the board.
+ *
+ * Sent from the two places the count can change and from nowhere else, so the number on screen is
+ * the number in the map rather than something recomputed on a timer and allowed to drift.
+ */
+function announceUnread(sessionId: string): void {
+  broadcast({ t: 'mail.unread', sessionId, count: mailWaiting.get(sessionId) ?? 0 })
+}
+
+/** The card has read its mail, by being typed at or by being handed it in its startup brief. */
+function markMailRead(sessionId: string): void {
+  store.clearPendingMail(sessionId)
+  clearUnreadMarker(sessionId)
+  mailWaiting.delete(sessionId)
+  mailRestored.delete(sessionId)
+  wakeUnsent.delete(sessionId)
+  announceUnread(sessionId)
+}
+
+/**
  * How many times this has tried to start each card for mail, and when it may try again.
  *
  * It was a plain set: one attempt, ever, and a card that failed to start was never tried again for
@@ -2692,6 +2888,378 @@ const WAKE_TRIES = 4
 const WAKE_BACKOFF_MS = 2000
 
 /**
+ * A wake line typed into a card whose submit has not been seen yet.
+ *
+ * This is the stacking the owner kept finding: three, four copies of the notice sitting in one
+ * composer, unsent. The line always landed; the Enter sixty milliseconds behind it did not, and
+ * nothing noticed. Every one of the stacked cards on 22 September had its first line typed while it
+ * was still booting in a launch storm, with the board itself stalling for seconds, and each then sat
+ * idle for seventeen minutes holding a work order it had never been prompted to read, until the next
+ * message's Enter sent both lines at once. The joined text had no newline between the two copies, so
+ * the first Enter had not been read as a pasted newline; it was simply gone.
+ *
+ * So a typed line is now a claim waiting for proof, and the proof is the card's own UserPromptSubmit
+ * hook. Until it arrives, a further message types nothing (another copy is exactly the stack) and the
+ * sweep resends only the Enter, on a widening delay. An Enter into an empty composer does nothing,
+ * so a resend after a submit that did go through is harmless. It is never resent over something the
+ * owner typed, because that would send his half-written draft.
+ *
+ * Claude cards only, because the proof is a Claude hook. Other adapters keep the old rule: read on
+ * typing.
+ */
+const wakeUnsent = new Map<string, Unsent>()
+
+/** A line typed into a card and not yet seen submitted. `mail` says whether its submit reads the inbox. */
+interface Unsent {
+  at: number
+  generation: number
+  enters: number
+  mail: boolean
+  /** What was typed, so a line the CLI lost can be typed once more. */
+  text: string
+  /** The card was idle when it was typed, so any turn starting after it is this line's turn. */
+  idle: boolean
+  retyped?: boolean
+}
+
+/**
+ * When each card's CLI last said SessionStart.
+ *
+ * The owner, the morning after the wake fix: "i have to enter a message 3 times before the session
+ * wakes up". A card resuming a long conversation draws its frame and then goes quiet for a minute
+ * while it loads, and every readiness test Garden had was "printed, then quiet", which that passes
+ * long before Claude will take a key. The first two lines landed in a composer that dropped their
+ * Enters; the third went through carrying both. SessionStart is posted by the CLI itself once the
+ * session is loaded, so for a Claude card it is the signal, with quiet on top of it.
+ *
+ * The fallback is for a card whose hook never reports (settings missing, a hook that failed): after
+ * this long since launch it is treated as ready on quiet alone, which is the old behaviour, rather
+ * than holding its input forever.
+ */
+const cliStartedAt = new Map<string, number>()
+/*
+ * Two minutes. It was 45 s until 23 September, when on a processor held at a fifth of its speed ATK
+ * side's resume took longer than that: its notice was typed 1.7 s before its SessionStart and sat
+ * unsent for three minutes.
+ */
+const READY_FALLBACK_MS = 120_000
+const CLI_SETTLE_MS = Number(process.env.GARDEN_CLI_SETTLE_MS) || 3000
+
+function cliStarted(sessionId: string): void {
+  cliStartedAt.set(sessionId, Date.now())
+}
+
+/** Whether a Claude card's CLI has reported its session loaded since this launch. */
+function sessionLoaded(sessionId: string, s: TerminalSession): boolean {
+  const launched = spawnedAt.get(sessionId) ?? 0
+  /*
+   * A Codex card sends no hooks, so there is no SessionStart to wait for. The stand-in: five seconds
+   * past launch and a screen quiet for a second and a half, which is Codex's composer drawn and
+   * waiting. Without it a line typed at a card that was off went in as soon as PowerShell printed
+   * anything, before Codex had a composer to receive it.
+   */
+  if (s.adapterId === 'codex') {
+    /*
+     * And Codex's composer glyph on screen. Five seconds and quiet was passed by PowerShell's own
+     * start-up output before Codex had run at all, so a notice went into PowerShell's input buffer
+     * and reached Codex as whatever was on screen when it started reading keys.
+     */
+    return (
+      Date.now() - launched > 5000 &&
+      // Three seconds, not one and a half: a working Codex redraws its timer every second.
+      Date.now() - (lastByteAt.get(sessionId) ?? 0) >= 3000 &&
+      (ptys.tail(sessionId, 8000).includes('›') || Date.now() - launched > READY_FALLBACK_MS)
+    )
+  }
+  if (s.adapterId !== 'claude') return true
+  /*
+   * SessionStart fires before a resumed conversation is drawn, and a line typed in that gap is drawn
+   * over and lost (the Keeper, 13:19 on 23 September). Three seconds past it covered the redraw, and
+   * cost three seconds on every start. The redraw ends with the prompt box, and the server holds a copy
+   * of the screen, so the box on screen is the signal and the three seconds are only the upper bound
+   * (canon 06 revision 10).
+   */
+  const started = cliStartedAt.get(sessionId) ?? 0
+  if (started >= launched && (ptys.promptShown(sessionId) || Date.now() - started >= CLI_SETTLE_MS)) return true
+  return Date.now() - launched > READY_FALLBACK_MS
+}
+
+/**
+ * Lines the owner typed on a card's input line, held until the CLI can take them.
+ *
+ * These used to be typed by the browser, which could only watch the byte stream and guess. The
+ * server has the SessionStart and the submit, so it holds the line, types it when the session is
+ * loaded, and presses Enter again until the submit is seen, exactly as it does for a mail notice.
+ * One at a time: a second line waits for the first to be submitted, or the two would land in one
+ * composer and go as one prompt.
+ */
+const heldLines = new Map<string, string[]>()
+const HELD_MAX = 5
+
+function pumpLines(sessionId: string): void {
+  const s = store.getSession(sessionId)
+  if (!s || !ptys.isLive(sessionId)) return
+  const launched = spawnedAt.get(sessionId) ?? 0
+  const lastByte = lastByteAt.get(sessionId) ?? 0
+  if (lastByte < launched) return
+  if (!sessionLoaded(sessionId, s)) return
+
+  const unsent = wakeUnsent.get(sessionId)
+  if (unsent && unsent.generation === s.generation) {
+    // A resend waits for quiet; the owner's own line, below, does not, so a loaded card answers at once.
+    if (quietFor(sessionId, s) >= 1500) resendWakeEnter(sessionId, unsent)
+    return
+  }
+  wakeUnsent.delete(sessionId)
+
+  const queue = heldLines.get(sessionId)
+  if (!queue?.length) return
+  /*
+   * Not before the last line's Enter has gone. Two lines sent back to back otherwise land as
+   * "one", "two", Enter, Enter: one prompt reading "onetwo" and a stray Enter behind it.
+   */
+  const gap = (lineTypedAt.get(sessionId) ?? 0) + enterDelayFor(sessionId) * 3 - Date.now()
+  if (gap > 0) {
+    setTimeout(() => pumpLines(sessionId), gap).unref?.()
+    return
+  }
+  const text = queue.shift()!
+  lineTypedAt.set(sessionId, Date.now())
+  if (!queue.length) {
+    heldLines.delete(sessionId)
+    heldAt.delete(sessionId)
+  }
+  if (!ptys.write(sessionId, text)) {
+    heldLines.set(sessionId, [text, ...(heldLines.get(sessionId) ?? [])])
+    return
+  }
+  /*
+   * Confirmed only when it is a prompt. Typed at a question, a menu or a permission prompt, it is an
+   * answer, which never produces a submit, and waiting for one is what pressed Enter three more times
+   * into the owner's multiple-choice question on 23 September and chose his remaining answers for
+   * him. Typed at a working card, the CLI queues it and the submit comes whenever the turn ends.
+   */
+  if (s.adapterId === 'claude' && s.status === 'idle' && !atPrompt(sessionId, s)) {
+    wakeUnsent.set(sessionId, { at: Date.now(), generation: s.generation, enters: 1, mail: false, text, idle: true })
+  }
+  writeLater(sessionId, s.generation, '\r')
+}
+
+/** When the server last typed an owner line into each card, so the next waits for its Enter. */
+const lineTypedAt = new Map<string, number>()
+
+/** The latest hook event from each card, so nothing is typed into a prompt that is still open. */
+const lastHook = new Map<string, { type: string; at: number }>()
+
+/**
+ * Whether the card is showing something an Enter would answer: a permission prompt, a question, a
+ * menu. `needs-input` covers what the CLI has announced; a tool call with no result yet covers the
+ * seconds before it announces it, which on 23 September were seven.
+ */
+function atPrompt(sessionId: string, s: TerminalSession): boolean {
+  if (s.status === 'needs-input') return true
+  const h = lastHook.get(sessionId)
+  return h !== undefined && (h.type === 'PreToolUse' || h.type === 'PermissionRequest')
+}
+
+/** The first resend four seconds after the line, then doubling: four Enters over about half a minute. */
+const WAKE_ENTERS = 4
+const WAKE_CONFIRM_MS = Number(process.env.GARDEN_WAKE_CONFIRM_MS) || 4000
+
+/**
+ * When the owner last typed something printable into each card.
+ *
+ * Only printable input counts. An open terminal also answers the CLI's own queries (focus in and
+ * out, device attributes, colour reports) through the same path, and those are not a draft. Nor are
+ * mouse reports, including the older `ESC[M` form, whose three bytes after it are printable.
+ */
+const ownerTypedAt = new Map<string, number>()
+const TERMINAL_REPLY = /\x1b(\[M[\s\S]{3}|\[[0-9;?<>=]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|P[^\x1b]*\x1b\\|[@-_])/g
+
+function noteOwnerInput(sessionId: string, data: string): void {
+  // A wheel step is not worth one of the twelve places kept for diagnosing a lost line.
+  if (onlyMouseReports(data)) return
+  logInput(sessionId, 'page', data)
+  if (data.replace(TERMINAL_REPLY, '').replace(/[\r\n]/g, '').length > 0) {
+    ownerTypedAt.set(sessionId, Date.now())
+  }
+}
+
+/*
+ * The last few things written into each card's terminal, from the page and from the server alike.
+ *
+ * Kept for one notice. Three resumed cards on 23 September (14:33, 17:54, 21:31) showed Claude's
+ * "Removed 2 invisible characters · review and press Enter to send" under a wake line that has no
+ * control characters in it, and the composer showed nothing else. What arrived beside it cannot be
+ * read off the screen afterwards, so when the notice is drawn these go into an event.
+ */
+const recentInput = new Map<string, { at: number; from: 'page' | 'server'; data: string }[]>()
+const invisibleNoticeAt = new Map<string, number>()
+
+function logInput(sessionId: string, from: 'page' | 'server', data: string): void {
+  const list = recentInput.get(sessionId) ?? []
+  list.push({ at: Date.now(), from, data: data.slice(0, 300) })
+  if (list.length > 12) list.splice(0, list.length - 12)
+  recentInput.set(sessionId, list)
+}
+
+/*
+ * What the recorded inputs showed, 21:53 on 23 September: nothing from the page at all, only the
+ * server's line and its Enters. On a slow start the CLI is not reading keys yet, the line and every
+ * Enter queue up, and Claude reads them as one paste. It strips the carriage returns inside it (the
+ * "invisible characters", one per Enter queued) and holds the text on a review screen that only an
+ * Enter sent after it is drawn will submit. Garden's resends had usually all been spent by then, so
+ * Scout and DEF side sat six minutes each until the Keeper pressed Enter by hand.
+ *
+ * So the notice at the bottom of the screen under a line Garden typed gets one Enter a second later,
+ * and the resend count starts again from there rather than giving up.
+ */
+const REVIEW_NOTICE = 'reviewandpressEntertosend'
+
+function noteInvisibleNotice(sessionId: string): void {
+  // Only when it is the live bottom of the screen, not a quotation of it in a card's own output.
+  if (!flatText(ptys.tail(sessionId, 1500)).includes(REVIEW_NOTICE)) return
+  const now = Date.now()
+  if (now - (invisibleNoticeAt.get(sessionId) ?? 0) < 30_000) return
+  invisibleNoticeAt.set(sessionId, now)
+  wakeEvent(sessionId, 'InvisibleCharsRemoved', {
+    // Oldest first, each with how long before the notice it arrived. JSON keeps the escapes readable.
+    inputs: (recentInput.get(sessionId) ?? []).map((i) => ({ msBefore: now - i.at, from: i.from, data: JSON.stringify(i.data) })),
+  })
+  const u = wakeUnsent.get(sessionId)
+  const s = store.getSession(sessionId)
+  if (!u || !s || u.generation !== s.generation) return
+  /*
+   * The count restarts now, not when the Enter below goes in. On .5Orche2 at 23:59:09 the sweep's
+   * give-up check ran in the second between the notice and that Enter, counted the Enters from before
+   * the notice, and raised a false enter-gave-up for a line submitted 3.5 s later.
+   */
+  u.at = now
+  u.enters = 1
+  setTimeout(() => {
+    const cur = store.getSession(sessionId)
+    if (!cur || cur.generation !== u.generation || wakeUnsent.get(sessionId) !== u) return
+    if (atPrompt(sessionId, cur) || (ownerTypedAt.get(sessionId) ?? 0) > now) return
+    if (!flatText(ptys.tail(sessionId, 1500)).includes(REVIEW_NOTICE)) return
+    logInput(sessionId, 'server', '\r')
+    if (!ptys.write(sessionId, '\r')) return
+    u.at = Date.now()
+    u.enters = 1
+    wakeEvent(sessionId, 'WakeEnterResent', { afterReviewNotice: true })
+  }, 1000).unref?.()
+}
+
+function wakeEvent(sessionId: string, type: string, payload: Record<string, unknown>): void {
+  const event = { id: randomUUID(), sessionId, ts: Date.now(), type, provenance: 'structured' as const, payload }
+  store.insertEvent(event)
+  broadcast({ t: 'event', event })
+}
+
+/** The card submitted a prompt, so whatever wake line was sitting in its composer went with it. */
+function promptSubmitted(sessionId: string): void {
+  const u = wakeUnsent.get(sessionId)
+  if (!u) return
+  wakeUnsent.delete(sessionId)
+  if (u.mail) markMailRead(sessionId)
+}
+
+/** A wake line is sitting unconfirmed. Press Enter again if it is time, and never type another copy. */
+function resendWakeEnter(sessionId: string, u: Unsent): WakeOutcome {
+  /*
+   * Only into an idle card with nothing open. An Enter is an answer to whatever is on screen, so a
+   * resend into a permission prompt approves it and into a question picks the highlighted option.
+   * A working card has queued the line; its submit comes when the turn ends.
+   */
+  const s = store.getSession(sessionId)
+  if (!s || s.status !== 'idle' || atPrompt(sessionId, s)) return 'queued'
+  if (u.enters >= WAKE_ENTERS) return retypeLostLine(sessionId, s, u)
+  if (Date.now() < u.at + WAKE_CONFIRM_MS * 2 ** (u.enters - 1)) return 'queued'
+  if ((ownerTypedAt.get(sessionId) ?? 0) > u.at) return 'queued'
+  if (!ptys.write(sessionId, '\r')) return 'queued'
+  u.enters++
+  wakeEvent(sessionId, 'WakeEnterResent', {
+    enters: u.enters,
+    secondsSinceLine: Math.round((Date.now() - u.at) / 1000),
+    // The last one says so, so a card left holding its notice is visible rather than silent.
+    gaveUp: u.enters >= WAKE_ENTERS,
+  })
+  // A first give-up on a line the screen no longer shows is retyped below, not reported.
+  if (u.enters >= WAKE_ENTERS && (u.retyped || lineOnScreen(sessionId, u.text))) reportGaveUp(sessionId, u)
+  return 'queued'
+}
+
+/**
+ * The give-up finding, a few seconds after the last Enter rather than with it.
+ *
+ * On Character Pipeline at 07:18:26 on 24 September the fourth Enter raised it, and the review
+ * notice was seen 1.0 s later; the Enter after the notice submitted the line at 07:18:36, so the
+ * finding was false. Queued Enters from a slow start are what put the review screen up, so the
+ * notice can land just after the last of them. The finding now waits, and is dropped if the notice
+ * reset the count, the line went, or the review screen is showing (its own Enter handles that).
+ */
+const GAVE_UP_SETTLE_MS = 5000
+function reportGaveUp(sessionId: string, u: Unsent): void {
+  const secs = Math.round((Date.now() - u.at) / 1000)
+  const enters = u.enters
+  setTimeout(() => {
+    if (wakeUnsent.get(sessionId) !== u || u.enters < WAKE_ENTERS) return
+    if (flatText(ptys.tail(sessionId, 1500)).includes(REVIEW_NOTICE)) return
+    const s = store.getSession(sessionId)
+    if (!s || s.generation !== u.generation) return
+    watchdog.report({
+      kind: 'enter-gave-up',
+      subject: sessionId,
+      projectId: s.projectId,
+      severity: 'act',
+      title: `A ${u.mail ? 'mail notice' : 'line you typed'} is stuck unsent in ${s.title}`,
+      detail: `Enter was pressed ${enters} times over ${secs} s and the card never submitted it.`,
+    })
+  }, GAVE_UP_SETTLE_MS).unref?.()
+}
+
+/**
+ * Whether a typed line is still drawn at the bottom of the card's screen, which is where the composer
+ * is. Compared with escapes and whitespace removed, because the CLI draws spaces as cursor moves.
+ */
+function lineOnScreen(sessionId: string, text: string): boolean {
+  const probe = flatText(text).slice(0, 40)
+  return probe.length > 0 && flatText(ptys.tail(sessionId, 3000)).includes(probe)
+}
+
+/**
+ * After the last Enter: a line the CLI never received is typed once more, instead of the card being
+ * left with a marker that blocks every later wake.
+ *
+ * Seen on the Keeper after the 1.1.23 restart: the notice went in a moment after SessionStart, the
+ * resumed conversation was drawn over it, and four Enters landed on an empty composer. The marker
+ * then stayed, so the card sat idle with 46 unread messages and nothing ever typed at it again.
+ *
+ * Only once per line, only while the screen does not show it (a line still in the composer is never
+ * typed twice), and never after the owner has typed.
+ */
+const RETYPE_AFTER_MS = Number(process.env.GARDEN_RETYPE_AFTER_MS) || 60_000
+
+function retypeLostLine(sessionId: string, s: TerminalSession, u: Unsent): WakeOutcome {
+  if (u.retyped) return 'queued'
+  /*
+   * Not before a minute. An idle Claude card under load took 38 s from its notice to its first tool
+   * call on 23 September, while the Enters gave up at 24 s, and a retype in that gap doubled the
+   * notice in the prompt. A tool call or Stop clears the marker, so a turn that starts late wins.
+   */
+  if (Date.now() - u.at < RETYPE_AFTER_MS) return 'queued'
+  if ((ownerTypedAt.get(sessionId) ?? 0) > u.at) return 'queued'
+  if (quietFor(sessionId, s) < 1500) return 'queued'
+  if (lineOnScreen(sessionId, u.text)) return 'queued'
+  if (!ptys.write(sessionId, u.text)) return 'queued'
+  u.retyped = true
+  u.at = Date.now()
+  u.enters = 1
+  wakeEvent(sessionId, 'WakeRetyped', { mail: u.mail })
+  writeLater(sessionId, s.generation, '\r')
+  return 'typed'
+}
+
+/**
  * When each card's terminal last produced a byte.
  *
  * Used to tell a CLI that has finished drawing from one that is still starting up. A fixed delay
@@ -2699,6 +3267,34 @@ const WAKE_BACKOFF_MS = 2000
  * is the thing actually being waited for.
  */
 const lastByteAt = new Map<string, number>()
+
+/**
+ * When each card's terminal last drew something other than a clock tick.
+ *
+ * While a background subagent runs, Claude redraws a seconds counter at the bottom of the screen and
+ * a spinner in the window title every second, so the byte stream never goes quiet for a second and a
+ * half. On 26 September .5Orche2 sat idle with eight messages unread for over half an hour: every
+ * notice was queued behind that clock. A chunk that is only escapes and a few digits is the clock,
+ * not a CLI still drawing, so the notice gates read this instead of `lastByteAt` for a Claude card.
+ */
+const lastDrawAt = new Map<string, number>()
+const CLOCK_TICK = /^\d{0,4}$/
+
+/** How long a card's screen has been still, for deciding whether a line may be typed into it now. */
+function quietFor(sessionId: string, s: TerminalSession): number {
+  const drawn = s.adapterId === 'claude' ? lastDrawAt.get(sessionId) ?? 0 : lastByteAt.get(sessionId) ?? 0
+  // A digit the owner types echoes like a tick, so his own keys count as drawing.
+  return Date.now() - Math.max(drawn, ownerTypedAt.get(sessionId) ?? 0)
+}
+
+/** When each Codex card last drew its working line ("esc to interrupt"). */
+const codexWorkingAt = new Map<string, number>()
+/** When each Codex card last drew "tab to queue message", and when Garden last pressed Enter there. */
+const codexHintAt = new Map<string, number>()
+/** When each Codex card last drew its approval prompt, and how many bytes it has printed since. */
+const codexAskAt = new Map<string, number>()
+const codexAfterAsk = new Map<string, number>()
+const codexEnterAt = new Map<string, number>()
 
 /**
  * When each card's process was actually spawned.
@@ -2773,7 +3369,7 @@ const launchFailed = new Set<string>()
  *
  * Only Claude cards. A shell card has no CLI to report in and is exactly what it appears to be.
  */
-function watchLaunch(id: string, at: number, pid: number | null): void {
+function watchLaunch(id: string, at: number, pid: number | null, waited = 0): void {
   setTimeout(() => {
     const cur = store.getSession(id)
     if (!cur || !ptys.isLive(id)) return
@@ -2829,10 +3425,59 @@ function watchLaunch(id: string, at: number, pid: number | null): void {
       .join(' | ')
       .slice(0, 300)
 
-    launchFailed.add(id)
-    console.error(`[garden] "${cur.title}" never reported in after launch. Last output: ${tail || '(nothing)'}`)
-    ptys.kill(id)
+    /*
+     * Silence is not absence. A CLI running under the card's shell is a slow launch, not a failed one,
+     * so it gets another grace period, up to LAUNCH_WAIT_MAX_MS in all. On 23 September, with the
+     * processor held at a fifth of its speed, this ended three healthy cards about a minute in: the
+     * Keeper at 18:19 and .5Orche2 at 21:53 after restarts, and Spells at 23:01:47, whose SessionStart
+     * had arrived at 23:01:36, five seconds after the sixty were up. Each read as "exit code 1".
+     */
+    void cliUnder(pid).then((alive) => {
+      const now = store.getSession(id)
+      if (!now || now.pid !== pid || !ptys.isLive(id) || store.hasEventSince(id, at)) return
+      if (alive && waited + LAUNCH_GRACE_MS < LAUNCH_WAIT_MAX_MS) {
+        console.error(`[garden] "${cur.title}" has not reported in after ${Math.round((waited + LAUNCH_GRACE_MS) / 1000)} s, but its CLI is running. Waiting longer.`)
+        watchLaunch(id, at, pid, waited + LAUNCH_GRACE_MS)
+        return
+      }
+      launchFailed.add(id)
+      console.error(`[garden] "${cur.title}" never reported in after launch. Last output: ${tail || '(nothing)'}`)
+      /*
+       * Said on the record before the kill, so the card-died finding can name Garden as the one that
+       * ended it. Scout at 09:07 on 24 September was ended here after five minutes with its CLI
+       * running and no SessionStart, and the finding said nobody had closed it.
+       */
+      wakeEvent(id, 'LaunchGaveUp', { waitedSeconds: Math.round((waited + LAUNCH_GRACE_MS) / 1000), cliRunning: alive, tail })
+      ptys.kill(id)
+    })
   }, LAUNCH_GRACE_MS).unref()
+}
+
+/** How long in all a launch whose CLI is visibly running may take to post its first hook event. */
+const LAUNCH_WAIT_MAX_MS = Number(process.env.GARDEN_LAUNCH_WAIT_MAX_MS) || 5 * 60_000
+
+/**
+ * Whether something is running under this shell besides its console host, which is what a launched
+ * CLI looks like. The failure the launch watch exists for is a shell left with nothing under it (the
+ * account shim refused and exited). False when it cannot be told, so the old behaviour stands.
+ */
+function cliUnder(shellPid: number): Promise<boolean> {
+  if (process.platform !== 'win32') return Promise.resolve(false)
+  return new Promise((resolve) => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter 'ParentProcessId=${Math.trunc(shellPid)}').Name`],
+      { windowsHide: true, timeout: 20_000 },
+      (err, out) =>
+        resolve(
+          !err &&
+            String(out)
+              .split(/\r?\n/)
+              .map((n) => n.trim())
+              .some((n) => n && !/^conhost(\.exe)?$/i.test(n)),
+        ),
+    ).unref?.()
+  })
 }
 
 /**
@@ -2860,13 +3505,14 @@ function watchLaunch(id: string, at: number, pid: number | null): void {
  * put down, a card that had crashed, and a card that read the message and replied were the same
  * sentence in SENT.md, which made the record worthless exactly when something had gone wrong.
  */
-type WakeOutcome = 'typed' | 'starting' | 'queued' | 'filed'
+type WakeOutcome = 'typed' | 'starting' | 'queued' | 'held' | 'filed'
 
 /** The short form that goes beside the entry in the sender's own SENT.md. */
 const SENT_NOTE: Record<WakeOutcome, string> = {
   typed: 'the card was told on screen',
   starting: 'the card was started for it',
   queued: 'the card is busy and will be told when it goes quiet',
+  held: 'the board is at its running limit; the card starts when a slot frees',
   filed: 'filed in its inbox, nothing is reading it',
 }
 
@@ -2885,6 +3531,10 @@ const ANSWER_FOR: Record<WakeOutcome, (title: string) => string> = {
   queued: (t) =>
     `filed for ${t}. It is mid-turn, so it will be told as soon as it goes quiet rather than being ` +
     'interrupted.',
+  held: (t) =>
+    `filed for ${t}, which is off. The board is at its limit of agent cards running at once, so it ` +
+    'has not been started yet. It starts on its own as soon as another card stops, or raise the ' +
+    'limit from the board.',
   filed: (t) =>
     `filed in ${t}'s inbox, but nothing is reading it: the card has no process running and could ` +
     'not be started. It will see this when it is next turned on. If it is needed now, start the ' +
@@ -2901,6 +3551,23 @@ const ANSWER_FOR: Record<WakeOutcome, (title: string) => string> = {
  * shipped one assertion that passed for the wrong reason. Unset is exactly today's behaviour.
  */
 const INPUT_DELAY_MS = Number(process.env.GARDEN_INPUT_DELAY_MS) || 60
+
+/**
+ * Codex needs the Enter much later than Claude does.
+ *
+ * Its composer treats an Enter arriving within 120 ms of a fast burst of characters as part of a
+ * paste and inserts a newline instead of submitting (PASTE_ENTER_SUPPRESS_WINDOW in codex-rs
+ * tui/src/bottom_pane/paste_burst.rs, read 2026-09-23). Garden's sixty milliseconds landed inside
+ * that window every time, so every line typed into a running Codex card, the owner's and every mail
+ * notice alike, sat in its box as text plus a blank line until he opened the terminal and pressed
+ * Enter himself. Well clear of the window, with room for a loaded machine delivering the text late.
+ */
+const CODEX_ENTER_DELAY_MS = Number(process.env.GARDEN_CODEX_ENTER_DELAY_MS) || 400
+
+/** The gap between a card's text and its Enter, by the CLI that has to read them. */
+function enterDelayFor(sessionId: string): number {
+  return store.getSession(sessionId)?.adapterId === 'codex' ? CODEX_ENTER_DELAY_MS : INPUT_DELAY_MS
+}
 
 /**
  * Type this into a card a moment from now, unless the card has been relaunched meanwhile.
@@ -2921,7 +3588,7 @@ const INPUT_DELAY_MS = Number(process.env.GARDEN_INPUT_DELAY_MS) || 60
  * having on its own: the restart button and a card that exits and is started again both bump the
  * generation today.
  */
-function writeLater(sessionId: string, generation: number, text: string, ms: number = INPUT_DELAY_MS): void {
+function writeLater(sessionId: string, generation: number, text: string, ms: number = enterDelayFor(sessionId)): void {
   setTimeout(() => {
     const now = store.getSession(sessionId)
     if (!now || now.generation !== generation) {
@@ -2944,12 +3611,13 @@ function writeLater(sessionId: string, generation: number, text: string, ms: num
       broadcast({ t: 'event', event })
       return
     }
+    logInput(sessionId, 'server', text)
     ptys.write(sessionId, text)
   }, ms).unref?.()
 }
 
+/** Try to tell the card now. The message has already been filed and counted by `fileMail`. */
 function wakeForMail(sessionId: string): WakeOutcome {
-  mailWaiting.set(sessionId, (mailWaiting.get(sessionId) ?? 0) + 1)
   return flushMailWake(sessionId)
 }
 
@@ -2990,6 +3658,18 @@ function flushMailWake(sessionId: string): WakeOutcome {
      */
     if (s.kind !== 'session') return 'filed'
     if (s.status === 'starting') return 'starting'
+    /*
+     * A count that came back from the database at boot is a fact about the past, not a message
+     * arriving now, so it does not buy a start. Without this line, restoring the badges would start
+     * every card holding mail the moment the board came up.
+     */
+    if (mailRestored.has(sessionId)) return 'filed'
+    /*
+     * "Agent cards running at once" holds this start like every other one (canon 15 revision 14).
+     * The mail stays waiting and the sweep asks again every half second, so the card starts as soon
+     * as a slot frees. Not counted as a start attempt, because nothing failed.
+     */
+    if (overCeiling(s.projectId, null, true, true)?.which === 'running') return 'held'
     /*
      * One start attempt per card, and the mail stays on the waiting list.
      *
@@ -3058,13 +3738,27 @@ function flushMailWake(sessionId: string): WakeOutcome {
    */
   const cliUp = (lastByteAt.get(sessionId) ?? 0) >= launchedAt
   if (!cliUp) return 'queued'
-  const lastByte = lastByteAt.get(sessionId) ?? 0
-  if (Date.now() - lastByte < 1500) return 'queued'
+  // Half a second is enough once the prompt box is on screen: the card has drawn the thing that takes keys.
+  if (quietFor(sessionId, s) < (s.adapterId === 'claude' && ptys.promptShown(sessionId) ? 500 : 1500)) return 'queued'
+  // Printed and quiet is not loaded: a resuming Claude card passes both a minute before it takes a key.
+  if (!sessionLoaded(sessionId, s)) return 'queued'
+  // Never into an open permission prompt or question: its characters pick options and its Enter answers.
+  if (atPrompt(sessionId, s)) return 'queued'
+  // Codex sends no hooks, so its approval prompt is read off the screen. Typed into one on 23 September,
+  // the notice cancelled Assistant's command and Codex reported "Conversation interrupted".
+  if (s.adapterId === 'codex' && codexAsking(sessionId)) return 'queued'
+  // An owner line typed and not yet submitted is his; the notice waits rather than joining it.
+  const theirs = wakeUnsent.get(sessionId)
+  if (theirs && !theirs.mail && theirs.generation === s.generation) return 'queued'
 
   // It is up, so the one-shot start guard has done its job. Released here rather than on exit so a
   // card that is woken, stopped and written to again can be woken again.
   wakeAttempted.delete(sessionId)
-  mailWaiting.delete(sessionId)
+
+  // A line already typed and not yet seen submitted: press Enter again, never type a second copy.
+  const unsent = wakeUnsent.get(sessionId)
+  if (unsent && unsent.generation === s.generation) return resendWakeEnter(sessionId, unsent)
+  wakeUnsent.delete(sessionId)
   /*
    * Read it now, decide before acting on it.
    *
@@ -3081,8 +3775,18 @@ function flushMailWake(sessionId: string): WakeOutcome {
    * warning that the wrong operators had been rebaked sat unread as ordinary content for nineteen
    * hours. Softening the READ as well would buy that back.
    */
-  const line =
-    waiting === 1
+  /*
+   * The messages themselves, when they are short enough, so the card does not spend a model step
+   * going to read INBOX.md (canon 06 revision 10). Labelled as another card's words, because this
+   * lands where the owner's own prompts do.
+   */
+  const pending = store.pendingMailFor(sessionId)
+  const inline = pending ? unreadInline(sessionId, pending.inboxOffset) : null
+  const line = inline
+    ? `${waiting === 1 ? 'A message arrived' : `${waiting} messages arrived`} on your wires from another card, not from the owner. ` +
+      'If it changes or cancels what you are working on, follow it; otherwise finish the step you are on and reply when you reach a stopping point. ' +
+      `It is also in your INBOX.md; you do not need to read it there. The mail: ${inline}`
+    : waiting === 1
       ? 'A message arrived on one of your wires. Read your INBOX.md now. If it changes or cancels what you are working on, follow it; otherwise finish the step you are on and reply when you reach a stopping point. Do not drop work in progress for a message that did not ask you to.'
       : `${waiting} messages arrived on your wires. Read your INBOX.md now. If they change or cancel what you are working on, follow them; otherwise finish the step you are on and reply when you reach a stopping point. Do not drop work in progress for messages that did not ask you to.`
   /*
@@ -3091,6 +3795,7 @@ function flushMailWake(sessionId: string): WakeOutcome {
    * the line in the composer with a blank line under it and sent nothing at all. The card's own
    * input line learned this the same way.
    */
+  logInput(sessionId, 'server', line)
   if (!ptys.write(sessionId, line)) {
     /*
      * The process went between `isLive` above and this write. Nothing was typed, so the message is
@@ -3101,8 +3806,487 @@ function flushMailWake(sessionId: string): WakeOutcome {
     wakeAttempted.delete(sessionId)
     return 'filed'
   }
+  /*
+   * Marked read only once the line is genuinely in the card's terminal.
+   *
+   * The clear used to sit above the write, beside the wake-attempt release, so the two failures
+   * underneath it were not symmetrical: a write that returned false put the count back, and every
+   * other way of losing the line did not. Now nothing is cleared until the text has landed.
+   */
+  if (s.adapterId === 'claude') {
+    /*
+     * Read when the submit is seen, not when the line lands. Clearing on typing is what let the
+     * badge go dark on a card that had its notice stuck in the composer, which is the very state
+     * the badge exists to show.
+     */
+    wakeUnsent.set(sessionId, {
+      at: Date.now(),
+      generation: s.generation,
+      enters: 1,
+      mail: true,
+      text: line,
+      idle: s.status === 'idle',
+    })
+  } else {
+    markMailRead(sessionId)
+  }
   writeLater(sessionId, s.generation, '\r')
+  if (s.adapterId === 'codex') {
+    codexEnterAt.set(sessionId, Date.now() + enterDelayFor(sessionId))
+    confirmCodexSubmit(sessionId, s.generation, Date.now(), 0, 0)
+  }
   return 'typed'
+}
+
+/**
+ * Whether the bottom of a Codex card's screen is an approval prompt, whose keys answer it.
+ * The strings are Codex's own, read from real cards' terminals on 23 September.
+ */
+const CODEX_ASKING = /Wouldyouliketorunthefollowingcommand|Yes,proceed\(y\)|No,andtellCodexwhattododifferently|Pressentertoconfirmoresctocancel/
+/*
+ * A Codex card waiting on its approval prompt shows as needing the owner, the same as a Claude card
+ * at a permission prompt. Seen by the Keeper at 16:44 on 23 September: two Codex cards sat on
+ * "retry without sandbox?" reading idle, with no finding, so nobody would have been told.
+ */
+setInterval(() => {
+  for (const s of store.listSessions()) {
+    if (s.adapterId !== 'codex' || !ptys.isLive(s.id)) continue
+    // Quiet first: a prompt still being drawn, or one just answered, is not a settled state.
+    if (Date.now() - (lastByteAt.get(s.id) ?? 0) < 1000) continue
+    const askAt = codexAskAt.get(s.id) ?? 0
+    const open = askAt > (codexWorkingAt.get(s.id) ?? 0) && (codexAfterAsk.get(s.id) ?? 0) < 3000
+    ingest.codexAsking(s.id, open && codexAsking(s.id))
+  }
+}, 3000).unref?.()
+
+function codexAsking(sessionId: string): boolean {
+  return CODEX_ASKING.test(flatText(ptys.tail(sessionId, 2500)))
+}
+
+/** A terminal's text with escapes and all whitespace removed, so words match however they were drawn. */
+function flatText(x: string): string {
+  return x.replace(TERMINAL_REPLY, '').replace(/\s+/g, '')
+}
+
+/**
+ * Codex's only proof of a submit is its working line. A notice with no working line after it gets
+ * its Enter again, three times at most, never into an approval prompt.
+ *
+ * Four cards in the 23 September run sat with the notice unsent: the server froze between the text
+ * and its Enter, the two reached Codex as one burst, and Codex's paste rule turned the Enter into a
+ * newline. An Enter on its own, later, submits the composer.
+ */
+const CODEX_CONFIRM_MS = Number(process.env.GARDEN_CODEX_CONFIRM_MS) || 4000
+function confirmCodexSubmit(sessionId: string, generation: number, typedAt: number, tries: number, waits: number): void {
+  setTimeout(() => {
+    const s = store.getSession(sessionId)
+    if (!s || s.generation !== generation || !ptys.isLive(sessionId)) return
+    if ((ownerTypedAt.get(sessionId) ?? 0) > typedAt) return
+    /*
+     * "tab to queue message" is drawn under Codex's composer only while text sits in it unsent.
+     * Rig Parity showed it for 22 minutes on 23 September while this check, seeing the working line,
+     * took the notice as submitted. An Enter then is safe: a working Codex queues the message
+     * ("Messages to be submitted after next tool call") rather than interrupting.
+     */
+    const waiting = (codexHintAt.get(sessionId) ?? 0) > (codexEnterAt.get(sessionId) ?? typedAt + enterDelayFor(sessionId))
+    if (!waiting && (codexWorkingAt.get(sessionId) ?? 0) > typedAt) return
+    if (codexAsking(sessionId) || (!waiting && Date.now() - (lastByteAt.get(sessionId) ?? 0) < 1000)) {
+      if (waits < 15) confirmCodexSubmit(sessionId, generation, typedAt, tries, waits + 1)
+      return
+    }
+    if (tries >= 3) {
+      watchdog.report({
+        kind: 'enter-gave-up',
+        subject: sessionId,
+        projectId: s.projectId,
+        severity: 'act',
+        title: `A mail notice is stuck unsent in ${s.title}`,
+        detail: `Codex never showed its working line after ${tries} extra Enters.`,
+      })
+      return
+    }
+    if (!ptys.write(sessionId, '\r')) return
+    codexEnterAt.set(sessionId, Date.now())
+    wakeEvent(sessionId, 'WakeEnterResent', { enters: tries + 2, codex: true })
+    confirmCodexSubmit(sessionId, generation, typedAt, tries + 1, waits)
+  }, CODEX_CONFIRM_MS).unref?.()
+}
+
+/*
+ * Put the unread badges back after a restart.
+ *
+ * This is the half that was missing for as long as the feature has existed. The count lived in a
+ * map in this process and nowhere else, so every restart of the board reported every card as having
+ * nothing waiting, while the messages sat in the INBOX.md files exactly where they had been left.
+ * The owner read that as mail being silently dropped, which is the worst possible way for a message
+ * system to fail: it looks like the sender lied.
+ *
+ * Restored, never re-woken. Every card named here goes into `mailRestored`, which stops
+ * `flushMailWake` from starting it. Twenty-three cards were holding mail the day this was written
+ * and the board must not answer a restart by launching twenty-three CLIs.
+ */
+for (const p of store.pendingMailByCard()) {
+  const s = store.getSession(p.sessionId)
+  if (!s || s.closedAt !== null) continue
+  mailWaiting.set(p.sessionId, p.count)
+  mailRestored.add(p.sessionId)
+}
+
+/** When each card's first held owner line was queued, for the watchdog's "held too long". */
+const heldAt = new Map<string, number>()
+
+/** The last lines of a card's terminal as plain text, for a finding's evidence. */
+function terminalTail(sessionId: string, lines: number): string {
+  const { data } = ptys.scrollback(sessionId)
+  // eslint-disable-next-line no-control-regex
+  const plain = data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]/g, '').replace(/\r/g, '')
+  return plain.split('\n').filter((l) => l.trim()).slice(-lines).join('\n')
+}
+
+/**
+ * Whether a Claude card's CLI has gone and left its shell at a prompt.
+ *
+ * A card is `powershell -NoExit -Command claude ...`, so a CLI that crashes mid-run does not end the
+ * process: the pty stays live, the status stays whatever the last hook said, and the only sign is a
+ * bare `PS E:\...>` as the last thing on screen. Only the last 2 KB is read, and only once the
+ * terminal has been quiet for ten seconds, so this is cheap enough for every tick.
+ */
+function atShellPrompt(sessionId: string): boolean {
+  const s = store.getSession(sessionId)
+  if (!s || s.adapterId !== 'claude' || !ptys.isLive(sessionId)) return false
+  if (Date.now() - (lastByteAt.get(sessionId) ?? 0) < 10_000) return false
+  const { data } = ptys.scrollback(sessionId)
+  // eslint-disable-next-line no-control-regex
+  const plain = data.slice(-2048).replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]/g, '').replace(/\r/g, '')
+  const last = plain.split('\n').filter((l) => l.trim()).at(-1) ?? ''
+  return /^PS [A-Za-z]:\\[^>]*>\s*$/.test(last)
+}
+
+/**
+ * The watchdog. docs/canonical/27-the-overseer.md. Started here, after the unread counts are back,
+ * so its first look at the cards sees the same board the owner does.
+ */
+const watchdog = new Watchdog({
+  store,
+  broadcast: (msg) => broadcast(msg),
+  dbPath: DB_PATH,
+  isLive: (id) => ptys.isLive(id),
+  lastByteAt: (id) => lastByteAt.get(id) ?? 0,
+  unread: (id) => mailWaiting.get(id) ?? 0,
+  heldSince: (id) => heldAt.get(id),
+  terminalTail,
+  atShellPrompt,
+  onAct: (f) => queueForKeeper(f),
+})
+watchdog.start()
+
+// ---------------------------------------------------------------------------------------------
+// The Keeper: the overseer's AI card. docs/canonical/27-the-overseer.md, stage 3.
+//
+// Everything here runs inside the server, so it exists only while Garden does. The Keeper is found
+// by its title rather than configured, so hiring it is the whole of switching it on, and closing it
+// switches it off. The owner's pause, in the Health section, stops every wake-up below.
+// ---------------------------------------------------------------------------------------------
+
+const KEEPER_FILE = join(DATA_DIR, 'keeper.json')
+const PATROL_MS = Number(process.env.GARDEN_KEEPER_PATROL_MS) || 30 * 60_000
+const GLANCE_MS = Number(process.env.GARDEN_KEEPER_GLANCE_MS) || 5 * 60_000
+/** At most one wake-up for findings a minute: a burst of findings is one message, not twenty. */
+const KEEPER_BATCH_MS = Number(process.env.GARDEN_KEEPER_BATCH_MS) || 60_000
+const EYES = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'garden-eyes.mjs')
+
+function keeperCard(): TerminalSession | undefined {
+  return store.listSessions().find((s) => s.title === 'Keeper' && s.kind === 'session' && s.closedAt === null)
+}
+
+function keeperPaused(): boolean {
+  try {
+    return JSON.parse(readFileSync(KEEPER_FILE, 'utf8')).paused === true
+  } catch {
+    return false
+  }
+}
+
+function keeperState(): { present: boolean; paused: boolean; running: boolean } {
+  const k = keeperCard()
+  return { present: Boolean(k), paused: keeperPaused(), running: Boolean(k && ptys.isLive(k.id)) }
+}
+
+function setKeeperPaused(paused: boolean): void {
+  writeFileSync(KEEPER_FILE, JSON.stringify({ paused }), 'utf8')
+  if (paused) keeperQueue.length = 0
+  broadcast({ t: 'keeper', ...keeperState() })
+}
+
+/** Any card with a process, other than the Keeper itself: the only time looking is worth paying for. */
+function boardBusy(keeperId: string): boolean {
+  return store.listSessions().some((s) => s.id !== keeperId && s.kind === 'session' && s.closedAt === null && ptys.isLive(s.id))
+}
+
+const keeperQueue: Finding[] = []
+let keeperNextAt = 0
+
+function queueForKeeper(f: Finding): void {
+  const k = keeperCard()
+  // Never about itself: a Keeper woken to diagnose its own silence would wake itself for ever.
+  if (!k || keeperPaused() || f.subject === k.id) return
+  /*
+   * Once per finding, and again only if it gets worse. A freeze run's count updates every minute, and
+   * each update used to mail the Keeper again: about thirty mails for one open matter on 23 September.
+   */
+  const rank = { info: 0, warn: 1, act: 2 } as Record<string, number>
+  const told = keeperTold.get(f.id)
+  if (told !== undefined && told >= (rank[f.severity] ?? 0)) return
+  keeperTold.set(f.id, rank[f.severity] ?? 0)
+  if (!keeperQueue.some((q) => q.id === f.id)) keeperQueue.push(f)
+}
+
+/** Each finding the Keeper has been mailed about, with the severity it was told at. */
+const keeperTold = new Map<string, number>()
+
+function tellKeeper(text: string): void {
+  const k = keeperCard()
+  if (!k) return
+  fileMail(k, 'Watchdog', text, { kind: 'work', taskId: 'overseer' })
+  wakeForMail(k.id)
+}
+
+let keeperShown = ''
+setInterval(() => {
+  // Hiring, starting, stopping or closing the Keeper all happen elsewhere; the Health section learns
+  // of them here, within five seconds, rather than from a hook in each of those paths.
+  const ks = keeperState()
+  const shown = JSON.stringify(ks)
+  if (shown !== keeperShown) {
+    keeperShown = shown
+    broadcast({ t: 'keeper', ...ks })
+  }
+  if (!keeperQueue.length || Date.now() < keeperNextAt) return
+  const batch = keeperQueue.splice(0)
+  keeperNextAt = Date.now() + KEEPER_BATCH_MS
+  rhythm.lastWokenAt = Date.now()
+  tellKeeper(
+    [
+      `The watchdog needs judgement on ${batch.length} finding${batch.length === 1 ? '' : 's'}:`,
+      '',
+      ...batch.map((f) => `- ${f.id}  [${f.kind}] ${f.title}${f.detail ? `. ${f.detail}` : ''}`),
+      '',
+      'Read each with garden-keeper.mjs --finding <id>, diagnose it, act within your powers, and record',
+      'what you did with --handled or --escalate. Garden bugs go to the Garden orchestrator as work.',
+    ].join('\n'),
+  )
+}, 5000).unref()
+
+const bootAt = Date.now()
+const rhythm = { lastPatrolAt: null as number | null, lastGlanceAt: null as number | null, lastWokenAt: null as number | null }
+
+setInterval(() => {
+  const k = keeperCard()
+  if (!k || keeperPaused() || !boardBusy(k.id)) return
+  rhythm.lastPatrolAt = Date.now()
+  tellKeeper(
+    'Patrol. Look at the board with garden-eyes.mjs --read and the open findings with garden-keeper.mjs ' +
+      '--findings. Act on anything that needs it; if nothing does, say so in one line and stop.',
+  )
+}, PATROL_MS).unref()
+
+/*
+ * The glance: the page compared with the server, with no AI turn unless they disagree.
+ *
+ * What only the page can show is the owner's view going wrong: a card drawn with a status the server
+ * no longer has (a stale page), or text sitting in a card's input line across two glances. Each
+ * becomes a finding, and only an `act` one wakes the Keeper, so a board that looks right costs one
+ * short child process every five minutes and nothing else.
+ */
+const STATUS_TEXT: Record<string, string> = {
+  starting: 'starting',
+  idle: 'idle',
+  working: 'working',
+  'needs-input': 'needs you',
+  done: 'done',
+  stopped: 'off',
+  failed: 'failed',
+}
+const glanceMismatch = new Map<string, number>()
+let glanceInputs = new Map<string, string>()
+
+function glance(): void {
+  const k = keeperCard()
+  if (!k || keeperPaused() || !boardBusy(k.id)) return
+  rhythm.lastGlanceAt = Date.now()
+  execFile(process.execPath, [EYES, '--read'], { timeout: 60_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+    // No board tab, no Chrome: nothing to compare, and not a fault.
+    if (err) return
+    let page: { cards: { id: string | null; title: string; status: string | null; inputLine: string | null }[] }
+    try {
+      page = JSON.parse(out)
+    } catch {
+      return
+    }
+    const inputs = new Map<string, string>()
+    for (const c of page.cards) {
+      const s = c.id ? store.getSession(c.id) : undefined
+      if (!s) continue
+      const expected = STATUS_TEXT[s.status]
+      if (c.status && expected && c.status !== expected) {
+        const n = (glanceMismatch.get(s.id) ?? 0) + 1
+        glanceMismatch.set(s.id, n)
+        if (n >= 2) {
+          watchdog.report({
+            kind: 'page-divergence',
+            subject: s.id,
+            projectId: s.projectId,
+            severity: 'act',
+            title: `The board shows ${s.title} as "${c.status}" but the server has it ${expected}`,
+            detail: 'Two glances five minutes apart. The page is not being told, which is a Garden bug.',
+          })
+        }
+      } else {
+        glanceMismatch.delete(s.id)
+      }
+      if (c.inputLine) {
+        inputs.set(s.id, c.inputLine)
+        if (glanceInputs.get(s.id) === c.inputLine) {
+          watchdog.report({
+            kind: 'input-left',
+            subject: s.id,
+            projectId: s.projectId,
+            severity: 'warn',
+            title: `Text has sat unsent in ${s.title}'s input line for over ${Math.round(GLANCE_MS / 60_000)} minutes`,
+            detail: `"${c.inputLine.slice(0, 120)}"`,
+          })
+        }
+      }
+    }
+    glanceInputs = inputs
+  })
+}
+setInterval(glance, GLANCE_MS).unref()
+
+/**
+ * Everything the overseer card draws, in one message. Next times are worked out from the fixed
+ * intervals since the server started, since that is when the timers were armed.
+ */
+function overseerView(): OverseerView {
+  const nextOf = (ms: number) => bootAt + Math.ceil((Date.now() - bootAt) / ms) * ms
+  return {
+    keeper: keeperState(),
+    machine: watchdog.snapshot(),
+    rhythm: {
+      ...rhythm,
+      nextPatrolAt: nextOf(PATROL_MS),
+      nextGlanceAt: nextOf(GLANCE_MS),
+      patrolMinutes: Math.round(PATROL_MS / 60_000),
+      glanceMinutes: Math.round(GLANCE_MS / 60_000),
+    },
+    queued: keeperQueue.length,
+    lately: store.notedFindings(8),
+  }
+}
+// Every ten seconds while a page is open; nothing is built when nobody is looking.
+setInterval(() => {
+  if (clients.size) broadcast({ t: 'overseer', view: overseerView() })
+}, 10_000).unref()
+
+/** A card by id, or by title among the open ones, on any board. */
+function cardByRef(ref: string): TerminalSession | undefined {
+  const cards = store.listSessions().filter((s) => s.kind === 'session')
+  return cards.find((s) => s.id === ref) ?? cards.find((s) => s.closedAt === null && s.title.toLowerCase() === ref.toLowerCase())
+}
+
+/**
+ * What the Keeper may ask and do, over `/keeper`. Each action checks the same conditions the design
+ * names, here rather than in the Keeper's good behaviour, and records itself as an event.
+ */
+function keeperOp(msg: any): { code: number; body: unknown } {
+  const op = String(msg?.op ?? '')
+  const refuse = (reason: string) => ({ code: 409, body: { ok: false, reason } })
+  if (op === 'findings') return { code: 200, body: store.liveFindings() }
+  if (op === 'finding') {
+    const f = store.getFinding(String(msg.id ?? ''))
+    return f ? { code: 200, body: f } : { code: 404, body: { ok: false, reason: 'no finding with that id' } }
+  }
+  if (op === 'machine') return { code: 200, body: watchdog.snapshot() }
+  if (op === 'handled' || op === 'escalate') {
+    const note = String(msg.note ?? '').trim()
+    if (!note) return refuse('say what was done: a note is required')
+    const ok = watchdog.handled(String(msg.id ?? ''), note.slice(0, 2000), op === 'handled' ? 'handled' : 'escalated')
+    return ok ? { code: 200, body: { ok: true } } : refuse('that finding is not live')
+  }
+
+  const s = cardByRef(String(msg.card ?? ''))
+  if (!s) return { code: 404, body: { ok: false, reason: `no card "${msg.card}"` } }
+  if (op === 'card') {
+    const u = wakeUnsent.get(s.id)
+    return {
+      code: 200,
+      body: {
+        id: s.id,
+        title: s.title,
+        projectId: s.projectId,
+        status: s.status,
+        statusSince: s.statusSince,
+        waitingFor: s.waitingFor,
+        exitCode: s.exitCode,
+        live: ptys.isLive(s.id),
+        unreadMail: mailWaiting.get(s.id) ?? 0,
+        unsentLine: u ? { typedAt: u.at, enters: u.enters, mail: u.mail } : null,
+        heldLines: heldLines.get(s.id)?.length ?? 0,
+        terminal: ptys.isLive(s.id) ? terminalTail(s.id, 40) : null,
+        events: store.listEvents(s.id, 40).map((e) => ({
+          ts: e.ts,
+          type: e.type,
+          tool: (e.payload as any)?.tool_name ?? undefined,
+          what: String((e.payload as any)?.tool_input?.command ?? (e.payload as any)?.prompt ?? (e.payload as any)?.message ?? '').slice(0, 160) || undefined,
+        })),
+      },
+    }
+  }
+  if (op === 'enter') {
+    // The one keystroke, under the same guard as Garden's own resends: a line Garden typed, an idle
+    // card, nothing open on screen.
+    const u = wakeUnsent.get(s.id)
+    if (!ptys.isLive(s.id)) return refuse(`${s.title} has no process`)
+    if (!u) return refuse(`${s.title} has no line Garden typed waiting to be sent, so there is nothing to press Enter on`)
+    if (s.status !== 'idle' || atPrompt(s.id, s)) return refuse(`${s.title} is ${s.status} or has a prompt open; an Enter now would answer it`)
+    if ((ownerTypedAt.get(s.id) ?? 0) > u.at) return refuse(`the owner has typed into ${s.title} since; his draft is not sent for him`)
+    ptys.write(s.id, '\r')
+    wakeEvent(s.id, 'KeeperEnter', { secondsSinceLine: Math.round((Date.now() - u.at) / 1000) })
+    return { code: 200, body: { ok: true } }
+  }
+  if (op === 'resume') {
+    // Once per death, and only a death the watchdog saw: the owner allowed resuming a crashed card,
+    // not starting cards in general.
+    const died = store.liveFinding('card-died', s.id)
+    if (!died) return refuse(`there is no crash recorded for ${s.title}; the Keeper resumes crashed cards and nothing else`)
+    if ((died.note ?? '').includes('resumed')) return refuse(`${s.title} was already resumed after this crash`)
+    if (s.closedAt !== null) return refuse(`${s.title} was closed; closing is the owner's and is not undone here`)
+    // A shell left standing by the crash is ended first, and only when it is still just a prompt:
+    // anything else on screen now means somebody is using it.
+    const leftover = ptys.isLive(s.id)
+    if (leftover && !atShellPrompt(s.id)) return refuse(`${s.title} is running`)
+    const begin = () => {
+      const now = store.getSession(s.id)
+      if (!now || now.closedAt !== null || ptys.isLive(s.id)) return
+      try {
+        broadcast({ t: 'session.updated', session: startSession({ ...now, status: 'starting' }) })
+      } catch (err) {
+        console.warn(`[garden] Keeper resume of ${s.title} failed: ${(err as Error).message}`)
+      }
+    }
+    if (leftover) {
+      ptys.kill(s.id)
+      const until = Date.now() + 5000
+      const whenGone = () => (!ptys.isLive(s.id) ? begin() : Date.now() < until ? setTimeout(whenGone, 100) : undefined)
+      whenGone()
+    } else {
+      begin()
+    }
+    watchdog.handled(died.id, `resumed by the Keeper at ${new Date().toLocaleTimeString()}`)
+    wakeEvent(s.id, 'KeeperResume', { finding: died.id, endedShell: leftover })
+    return { code: 200, body: { ok: true } }
+  }
+  return { code: 400, body: { ok: false, reason: `unknown op "${op}"` } }
 }
 
 /*
@@ -3111,8 +4295,13 @@ function flushMailWake(sessionId: string): WakeOutcome {
  * reads the same store they write cannot miss an edge one of those paths forgot to announce.
  */
 setInterval(() => {
+  // The owner's own lines first, so a notice waits behind what he typed rather than jumping ahead of it.
+  for (const id of new Set([...heldLines.keys(), ...wakeUnsent.keys()])) {
+    if (!mailWaiting.has(id) || heldLines.has(id)) pumpLines(id)
+  }
   for (const id of [...mailWaiting.keys()]) flushMailWake(id)
-}, 1500).unref()
+  // Every half second: at 1.5 s this alone added up to a second and a half to every delivery.
+}, 500).unref()
 
 /**
  * Tell every window the count moved.
@@ -3167,11 +4356,16 @@ interface Ceiling {
  * Returns null when there is room. Every refusal names the count and the current figure, because
  * "refused" without a number is something the owner has to go and measure himself.
  */
-function overCeiling(projectId: string, parent: TerminalSession | null, starting: boolean): Ceiling | null {
+function overCeiling(projectId: string, parent: TerminalSession | null, starting: boolean, existing = false): Ceiling | null {
   const limits = store.getLimits(projectId)
 
+  /*
+   * A card already on the board does not add to the card count by being switched on. `--start` was
+   * refused on 23 September for three stopped 0.5 cards because the board held 25 of 25: a restart
+   * treated as a hire, while the board's own Turn on went through.
+   */
   const cards = store.countCards(projectId)
-  if (cards >= limits.cardsPerProject) {
+  if (!existing && cards >= limits.cardsPerProject) {
     return {
       which: 'cards',
       said:
@@ -3473,6 +4667,7 @@ function cardDirFor(sessionId: string): string | null {
 }
 
 function startSession(s: TerminalSession): TerminalSession {
+  const launchT0 = Date.now()
   const project = store.getProject(s.projectId)
   if (!project) throw new Error('unknown project')
   // The project owns the account, not the session. Enforced here so a session can never run on
@@ -3708,6 +4903,9 @@ function startSession(s: TerminalSession): TerminalSession {
   }
   store.upsertSession(updated)
   if (s.adapterId === 'claude') watchLaunch(s.id, updated.statusSince ?? Date.now(), pid)
+  // For the stall sensor: a launch is the usual reason the board freezes, and it names the card and
+  // how long the launch itself held the server.
+  watchdog.note(`launch ${s.title} (${Date.now() - launchT0} ms)`)
   return updated
 }
 
@@ -3998,7 +5196,18 @@ function handle(ws: WebSocket, msg: ClientMessage) {
     return fail(ws, may.reason, msg.t)
   }
 
+  watchdog.note(`ws ${msg.t}`)
   switch (msg.t) {
+    case 'finding.dismiss': {
+      if (typeof msg.id === 'string') watchdog.dismiss(msg.id)
+      return
+    }
+
+    case 'keeper.pause': {
+      setKeeperPaused(msg.paused === true)
+      return
+    }
+
     // Answered and nothing else. The page uses the round trip to tell a live socket from a
     // half-open one, which it cannot do with a protocol-level ping because the browser answers
     // those below JavaScript and never tells the page.
@@ -4914,7 +6123,15 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       const text = String(msg.text ?? '').trim()
       if (!text) return
 
-      postMessage(to, from.title, text)
+      fileMail(to, from.title, text)
+      /*
+       * Tell the card, the same as every other path that writes to an inbox.
+       *
+       * This one did not, and it is the owner's own send button: a message typed on the board went
+       * into the file, pulsed the wire, and nothing ever reached the card. Every other sender in
+       * this file wakes its recipient, so the omission read as a missing line rather than a policy.
+       */
+      wakeForMail(to.id)
       broadcast({ t: 'wire.pulse', wireId: wire.id, kind: wire.kind })
       const event = {
         id: randomUUID(),
@@ -6008,46 +7225,259 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       /*
        * Windows' own folder dialog, run in an STA PowerShell because the dialog requires one.
        *
-       * Two details matter and both were wrong first time. The console window must be hidden, or
-       * a black box flashes up and takes focus. And the dialog needs a topmost owner window, or
-       * it can open behind the app and, when it closes, Windows hands focus to whatever is
-       * underneath, which looked exactly like Garden minimising itself.
+       * The console window must be hidden, or a black box flashes up and takes focus.
+       *
+       * The dialog opens BEHIND the browser, and the owner form below cannot prevent it. Measured
+       * on the owner's machine while he clicked: the dialog is created and `VISIBLE=True` at
+       * (793,376)-(1763,1278), but `isForeground=False` with Chrome in front, and because the owner
+       * form sets `ShowInTaskbar = $false` there is no taskbar button either. So a working dialog
+       * sat waiting where nothing on screen could reveal it, and the plus tab read as a dead button.
+       *
+       * The cause is Windows' foreground lock, not the dialog. This server is an orphaned
+       * background process whose parent terminal has exited and which has never received user
+       * input, so it is refused the right to take foreground: called from here, `SetForegroundWindow`
+       * returns **False**. Running the identical command from an interactive shell works, which is
+       * why this looked unreproducible.
+       *
+       * `raiseScript` below is the documented way out, and each step was tried against the live
+       * stuck dialog before being written here: `SetWindowPos(HWND_TOPMOST)` returns true and does
+       * nothing, `BringWindowToTop` does nothing, `SetForegroundWindow` returns false. Attaching
+       * this thread's input queue to the current foreground thread first lifts the lock, and then
+       * the same calls succeed.
        */
-      const script = [
-        'Add-Type -AssemblyName System.Windows.Forms;',
-        '$owner = New-Object System.Windows.Forms.Form;',
-        '$owner.TopMost = $true;',
-        '$owner.ShowInTaskbar = $false;',
-        '$owner.Opacity = 0;',
-        '$owner.Show();',
-        '$d = New-Object System.Windows.Forms.FolderBrowserDialog;',
-        "$d.Description = 'Pick a project folder for Garden';",
-        '$d.ShowNewFolderButton = $true;',
-        '$result = $d.ShowDialog($owner);',
-        '$owner.Close();',
-        'if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
-      ].join('')
+      // The Explorer-style picker lives in its own file, beside garden-restart.mjs, and is found the
+      // same way. Canon 02 revision 11.
+      const pickerHere = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'pick-folder.ps1')
+      const picker = existsSync(pickerHere)
+        ? pickerHere
+        : join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'pick-folder.ps1')
 
-      execFile(
+      /*
+       * Finds the dialog owned by a given pid and drags it to the front, run from OUTSIDE that
+       * process because the process itself is blocked inside `ShowDialog`. An in-process timer was
+       * tried first and never fired: `FolderBrowserDialog` wraps the shell's `SHBrowseForFolder`,
+       * which runs its own modal loop rather than pumping the WinForms one.
+       *
+       * Prints `NOTYET` while the window does not exist yet, so the caller knows to try again.
+       */
+      const raiseScript = [
+        '$sig = @"',
+        '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
+        '[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);',
+        '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);',
+        '[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f);',
+        '[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);',
+        '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+        '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+        '[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);',
+        '[DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);',
+        '[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
+        '[DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);',
+        '[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);',
+        '[DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr h, bool alt);',
+        '[DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);',
+        'public struct RECT { public int L, T, R, B; }',
+        'public delegate bool EnumProc(IntPtr h, IntPtr l);',
+        '"@',
+        '$t = Add-Type -MemberDefinition $sig -Name Raise -Namespace Garden -PassThru',
+        '$api = $t | Where-Object { $_.Name -eq "Raise" }',
+        'Add-Type -AssemblyName System.Windows.Forms',
+        /*
+         * Where the dialog goes. Unowned, Windows put it at (0,0): measured on the owner's 3840 wide
+         * screen, a 664 pixel box in the far top-left corner, in front and visible and still read as
+         * "not opening". So it is centred on the screen the pointer is on, which is where he just
+         * clicked the + tab. Canon 02 revision 15.
+         */
+        '$area = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea',
+        '$target = [uint32]$env:GARDEN_DIALOG_PID',
+        // The whole retry budget lives here rather than in the caller, so this is one process with
+        // one timeout and one thing to kill.
+        '$deadline = (Get-Date).AddMilliseconds(4000)',
+        '$raised = $false',
+        '$stable = 0',
+        '$tries = ""',
+        'while (-not ($raised -and $stable -ge 2) -and (Get-Date) -lt $deadline) {',
+        '  $script:h = [IntPtr]::Zero',
+        '  $cb = [Garden.Raise+EnumProc]{ param($w,$l)',
+        '    $p = [uint32]0; [void]$api::GetWindowThreadProcessId($w,[ref]$p)',
+        '    if ($p -eq $target) {',
+        '      $cn = New-Object System.Text.StringBuilder 64; [void]$api::GetClassName($w,$cn,64)',
+        '      if ($cn.ToString() -eq "#32770") { $script:h = $w; return $false } }',
+        '    return $true }',
+        '  [void]$api::EnumWindows($cb, [IntPtr]::Zero)',
+        '  if ($script:h -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 250; continue }',
+        /*
+         * Placed on every pass until it has stayed put for two in a row. Moving it once did not hold:
+         * the dialog lays itself out after its window first exists and put itself back at (0,0).
+         */
+        '  $r = New-Object Garden.Raise+RECT; [void]$api::GetWindowRect($script:h, [ref]$r)',
+        '  $w = $r.R - $r.L; $hh = $r.B - $r.T',
+        '  $x = $area.X + [int](($area.Width - $w) / 2); $y = $area.Y + [int](($area.Height - $hh) / 2)',
+        '  if ($r.L -eq $x -and $r.T -eq $y) { $stable++ } else {',
+        // SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE: only the position changes here.
+        '    [void]$api::SetWindowPos($script:h, [IntPtr]::Zero, $x, $y, 0, 0, 0x0001 -bor 0x0004 -bor 0x0010)',
+        '    $stable = 0',
+        '  }',
+        '  if ($raised) { Start-Sleep -Milliseconds 250; continue }',
+        '  $fg = $api::GetForegroundWindow()',
+        '  $fgp = [uint32]0',
+        '  $fgThread = $api::GetWindowThreadProcessId($fg, [ref]$fgp)',
+        '  $me = $api::GetCurrentThreadId()',
+        '  $attached = $false',
+        /*
+         * The detach is in `finally` because attaching leaves two threads sharing one input queue.
+         * Leaving them attached after a failure would hand this process's input fate to another
+         * program's UI thread, and the attach is exactly the call that can hang if that thread is
+         * not pumping messages.
+         */
+        '  try {',
+        '    $attached = $api::AttachThreadInput($me, $fgThread, $true)',
+        '    [void]$api::ShowWindow($script:h, 5)',
+        '    [void]$api::BringWindowToTop($script:h)',
+        /*
+         * A tap of Alt first. Windows grants the foreground to a process that has just seen input,
+         * and the attach above did not always suffice: on 2026-09-29 the dialog again sat behind
+         * the browser for five minutes. Held across the call and released after, so the release
+         * lands on the dialog (which only underlines its shortcut letters) rather than on the
+         * browser, where a bare Alt tap would highlight its menu.
+         */
+        '    $api::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)',
+        '    try { [void]$api::SetForegroundWindow($script:h) } finally { $api::keybd_event(0x12, 0, 2, [UIntPtr]::Zero) }',
+        '    [void]$api::SetWindowPos($script:h, [IntPtr](-1), 0,0,0,0, 0x0001 -bor 0x0002 -bor 0x0040)',
+        '  } finally {',
+        '    if ($attached) { [void]$api::AttachThreadInput($me, $fgThread, $false) }',
+        '  }',
+        /*
+         * The owner's own click is the case the steps above lose. A pick sent while he was not
+         * clicking came to the front every time; a pick from his click on the + tab went behind the
+         * browser ("when u do it, the window opens up, when i press plus it goes behind garden app").
+         * Chrome has just had his input, and Windows guards the window that has. SwitchToThisWindow is
+         * the call the Alt+Tab switcher uses, and is tried when the others were refused.
+         */
+        '  if ($api::GetForegroundWindow() -ne $script:h) { $api::SwitchToThisWindow($script:h, $true); $tries += "switch;" }',
+        '  if ($api::GetForegroundWindow() -eq $script:h) { $raised = $true }',
+        '  Start-Sleep -Milliseconds 250',
+        '}',
+        '$fr = New-Object Garden.Raise+RECT; if ($script:h -ne [IntPtr]::Zero) { [void]$api::GetWindowRect($script:h, [ref]$fr) }',
+        '$fgNow = $api::GetForegroundWindow(); $fgPid = [uint32]0; [void]$api::GetWindowThreadProcessId($fgNow, [ref]$fgPid)',
+        '$top = if ($script:h -ne [IntPtr]::Zero) { ($api::GetWindowLong($script:h, -20) -band 8) -ne 0 } else { $false }',
+        'Write-Output ("{0} front={1} frontPid={2} topmost={9} at={3},{4} size={5}x{6} area={7} tries={8}" -f $(if ($raised) { "RAISED" } else { "TRIED" }), ($fgNow -eq $script:h), $fgPid, $fr.L, $fr.T, ($fr.R - $fr.L), ($fr.B - $fr.T), $area, $tries, $top)',
+      ].join('\n')
+
+      const child = execFile(
         'powershell.exe',
-        ['-STA', '-NoProfile', '-NonInteractive', '-Command', script],
-        { timeout: 120000, windowsHide: true },
+        ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', picker],
+        /*
+         * Five minutes, because the thing being waited on is a person browsing a disk.
+         *
+         * This was 120s, then briefly 20s on the theory that the dialog never opened at all and a
+         * fast failure was kinder. Both the theory and the 20s were wrong, and measured on this
+         * machine: the dialog opens, takes foreground, and the owner picked a folder 66 seconds
+         * later with no error. A 20s limit would have killed it under his hand, mid-browse, and
+         * then blamed a missing desktop session. Anything shorter than a human is a bug.
+         */
+        { timeout: 300000, windowsHide: true },
         (err, stdout) => {
           const picked = String(stdout ?? '').trim()
-          if (err || !picked) {
-            // Cancelling is a normal outcome, not an error worth a banner.
+          /*
+           * A dialog that never appears is not a cancellation, and saying it is cost the owner an
+           * evening of a button that did nothing.
+           *
+           * The old code reported every failure as `path: null`, which the client renders exactly
+           * like the owner changing his mind, so the one outcome that needed saying out loud was
+           * the one that said nothing. That part was real and is fixed below.
+           *
+           * What was NOT real is the cause first written here, that the server had no interactive
+           * window station. Measured on this machine instead of assumed: the spawned PowerShell
+           * reports `UserInteractive=True`, `WindowStation=WinSta0`, session 1, and running this
+           * exact command opens a visible `#32770` "Browse For Folder" that takes foreground and
+           * returns the chosen path. The two processes found hanging after two clicks were dialogs
+           * sitting open waiting for a click, not dialogs that failed to appear.
+           *
+           * So a timeout here means the dialog was left open, which is a person who walked away or
+           * did not notice it, and not a broken desktop. Say that, and do not name a cause that has
+           * not been established.
+           *
+           * Cancelling is a clean exit with empty output. Anything else is a failure and is now
+           * named, with the way out in the same sentence, because the fallback is in the menu right
+           * above the item he just clicked.
+           */
+          if (err) {
+            const killed = (err as NodeJS.ErrnoException & { killed?: boolean }).killed
+            // A dialog left open for five minutes is closed quietly: the owner asked for that
+            // notice to go ("delete that notification and resolve the issue"), and the dialog now
+            // opens in front with a taskbar button of its own, so it is never hidden while he waits.
+            if (!killed) fail(ws, `the folder dialog could not run: ${err.message}`, 'project.pick')
+            send(ws, { t: 'project.picked', path: null })
+            return
+          }
+          if (!picked) {
+            // A clean exit with nothing chosen. This one really is a cancel.
             send(ws, { t: 'project.picked', path: null })
             return
           }
           try {
             const project = addProject(picked)
             broadcast({ t: 'project.added', project })
+            tabOpened(project.id, project.tabOrder == null)
             send(ws, { t: 'project.picked', path: picked })
           } catch (e) {
             fail(ws, (e as Error).message, 'project.pick')
+            /*
+             * `project.picked` ends a pick, and it has to end on every path or nothing does.
+             * This one was missing, so a folder that failed to add left the client believing a
+             * dialog was still open. That was harmless until the client started disabling the menu
+             * item while a pick is in flight, at which point it would disable it forever.
+             */
+            send(ws, { t: 'project.picked', path: null })
           }
         },
       )
+
+      /*
+       * One helper, spawned once, carrying its own retry budget.
+       *
+       * This was twelve separate spawns at 300ms, which is the wrong shape: twelve processes to
+       * track, twelve timeouts, and on the path where the dialog never appears the last one starts
+       * after the dialog it was waiting for may already have been cancelled. The helper now loops
+       * internally for the same 4s and exits on success, so there is one process, one timeout, and
+       * one thing to kill.
+       *
+       * The timeout is deliberately longer than the helper's own budget: it is the backstop for the
+       * helper hanging, which `AttachThreadInput` can do if the foreground thread is not pumping
+       * messages. Killing it then costs a raise, never the pick, because nothing here is awaited.
+       */
+      if (child.pid !== undefined) {
+        execFile(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', raiseScript],
+          {
+            timeout: 8000,
+            windowsHide: true,
+            env: { ...process.env, GARDEN_DIALOG_PID: String(child.pid) },
+          },
+          (err, out) => {
+            // Nothing depends on the outcome: the dialog is already up either way, and the pick is
+            // reported by the handler above. What the raise saw is kept, because whether the picker
+            // reached the front is otherwise known only to whoever was looking at the screen.
+            try {
+              appendFileSync(
+                join(DATA_DIR, 'pick-raise.log'),
+                `${new Date().toISOString()} ${err ? `error ${err.message.split('\n')[0]}` : String(out).trim()}\n`,
+              )
+            } catch {
+              // A log that cannot be written costs the record, never the pick.
+            }
+          },
+        )
+      }
+      return
+    }
+
+    case 'project.reorder': {
+      if (!Array.isArray(msg.ids) || msg.ids.some((id) => typeof id !== 'string')) return fail(ws, 'ids required', msg.t)
+      store.setTabOrder(msg.ids)
+      broadcast({ t: 'projects.ordered', ids: store.listProjects().map((p) => p.id) })
       return
     }
 
@@ -6055,6 +7485,7 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       if (typeof msg.path !== 'string' || !msg.path.trim()) return fail(ws, 'path required', msg.t)
       const project = addProject(msg.path, msg.name)
       broadcast({ t: 'project.added', project })
+      tabOpened(project.id, project.tabOrder == null)
       return
     }
 
@@ -6089,6 +7520,7 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       if (!project) return fail(ws, 'unknown project', msg.t)
       store.setProjectArchived(project.id, false)
       broadcast({ t: 'project.added', project: store.getProject(project.id)! })
+      tabOpened(project.id, true)
       // Its cards come back with it, since nothing was ever thrown away.
       for (const s of store.listSessions().filter((x) => x.projectId === project.id)) {
         broadcast({ t: 'session.added', session: s })
@@ -6159,6 +7591,7 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       }
       store.setProjectArchived(project.id, false)
       broadcast({ t: 'project.added', project: store.getProject(project.id)! })
+      tabOpened(project.id, true)
 
       for (const saved of board.sessions) {
         const live = store.getSession(saved.id)
@@ -6561,6 +7994,9 @@ function handle(ws: WebSocket, msg: ClientMessage) {
        * which is the same reason `writeLater` records its own.
        */
       if (!ptys.isLive(msg.sessionId)) {
+        // A mouse report is not typing, so none was lost. A stopped card's dock pane can still believe
+        // its program asked for the mouse, and would otherwise record one of these per wheel step.
+        if (onlyMouseReports(msg.data)) return
         const event = {
           id: randomUUID(),
           sessionId: msg.sessionId,
@@ -6576,7 +8012,48 @@ function handle(ws: WebSocket, msg: ClientMessage) {
         broadcast({ t: 'event', event })
         return
       }
+      noteOwnerInput(msg.sessionId, msg.data)
       ptys.write(msg.sessionId, msg.data)
+      return
+    }
+
+    /*
+     * A whole line from the card's input line, rather than keystrokes. Held and typed by the server,
+     * which can see SessionStart and the submit; the browser could only guess from the byte stream.
+     */
+    /*
+     * A screenshot pasted with Ctrl+V, saved so its path can be typed where he pasted. Canon 03,
+     * "Pasting a screenshot". Images only, and a name Garden makes, so nothing from the page chooses
+     * where a file lands.
+     */
+    case 'paste.image': {
+      const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp' } as Record<string, string>)[msg.mime]
+      if (!ext || typeof msg.data !== 'string' || !msg.data) {
+        send(ws, { t: 'paste.saved', reqId: msg.reqId, path: null, error: 'not an image' })
+        return
+      }
+      try {
+        const dir = join(DATA_DIR, 'pastes')
+        mkdirSync(dir, { recursive: true })
+        const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)
+        const file = join(dir, `paste-${stamp}-${Math.random().toString(36).slice(2, 6)}.${ext}`)
+        writeFileSync(file, Buffer.from(msg.data, 'base64'))
+        send(ws, { t: 'paste.saved', reqId: msg.reqId, path: file })
+      } catch (err) {
+        send(ws, { t: 'paste.saved', reqId: msg.reqId, path: null, error: (err as Error).message })
+      }
+      return
+    }
+
+    case 'session.line': {
+      if (typeof msg.text !== 'string' || !msg.text) return
+      if (!store.getSession(msg.sessionId)) return
+      const queue = heldLines.get(msg.sessionId) ?? []
+      if (queue.length >= HELD_MAX) return
+      queue.push(msg.text)
+      if (!heldLines.has(msg.sessionId)) heldAt.set(msg.sessionId, Date.now())
+      heldLines.set(msg.sessionId, queue)
+      pumpLines(msg.sessionId)
       return
     }
 
@@ -6732,7 +8209,26 @@ function handle(ws: WebSocket, msg: ClientMessage) {
     case 'agent.chat': {
       const s = store.getSession(msg.sessionId)
       if (!s) return
-      send(ws, { t: 'agent.chat', sessionId: s.id, turns: s.transcriptPath ? readChat(s.transcriptPath) : [] })
+      /*
+       * A page, not the whole conversation. Without `before` it is the newest turns; with it, the
+       * turns just older than a page the card already holds, which is how scrolling up reaches the
+       * start of a transcript the old reader could not: 735MB on this board, where the old one gave
+       * up at 32. `readChatPage` explains the offsets. `older` tells the card which of the two it
+       * is holding, since the answer to an older request must not be taken for the live tail.
+       */
+      const older = typeof msg.before === 'number'
+      const page = s.transcriptPath
+        ? readChatPage(s.transcriptPath, older ? msg.before! : null)
+        : { turns: [], cursor: 0, atStart: true }
+      send(ws, {
+        t: 'agent.chat',
+        sessionId: s.id,
+        turns: page.turns,
+        cursor: page.cursor,
+        atStart: page.atStart,
+        older,
+        file: s.transcriptPath ?? undefined,
+      })
       return
     }
 
@@ -6878,6 +8374,17 @@ ptys.on('data', (sessionId: string, data: string, seq: number) => {
   // Noted before the broadcast, so "has this terminal gone quiet" is answered from the stream
   // itself rather than from a guess about how long a CLI takes to start.
   lastByteAt.set(sessionId, Date.now())
+  if (!CLOCK_TICK.test(flatText(data))) lastDrawAt.set(sessionId, Date.now())
+  // Codex redraws this every second while a turn runs, and it is the only proof of a submit it gives.
+  // Compared without escapes or spaces: ConPTY draws spaces as cursor moves.
+  if (data.includes('interrupt') && flatText(data).includes('esctointerrupt')) codexWorkingAt.set(sessionId, Date.now())
+  // Drawn only while text sits unsent in the composer, so its time says whether it is current.
+  if (data.includes('queue') && flatText(data).includes('tabtoqueuemessage')) codexHintAt.set(sessionId, Date.now())
+  // An approval prompt is open from when it is drawn until the working line returns or the screen
+  // has moved well past it. Its text can linger in the tail after an answer, so the tail alone is not enough.
+  if (CODEX_ASKING.test(flatText(data))) { codexAskAt.set(sessionId, Date.now()); codexAfterAsk.set(sessionId, 0) }
+  else if (codexAskAt.has(sessionId)) codexAfterAsk.set(sessionId, (codexAfterAsk.get(sessionId) ?? 0) + data.length)
+  if (data.includes('invisible') && flatText(data).includes('invisiblecharacter')) noteInvisibleNotice(sessionId)
   broadcast({ t: 'session.data', sessionId, data, seq })
 })
 
@@ -6931,12 +8438,50 @@ const ingest = new Ingest({
   broadcast,
   placeChild: (parent, w, h) => placeSpawnedCard(parent, w, h),
   refreshMail: (cardId) => refreshMail(cardId),
+  /*
+   * The brief carried the backlog, but a brief is context, not a prompt: a card started for mail and
+   * cleared here came up holding its work order and sat idle, because nothing asked it anything. So a
+   * live card with mail waiting keeps the count, the notice is typed once the session is loaded, and
+   * its submit clears it. A SessionStart from a card with no process (only a test does that) clears.
+   */
+  mailRead: (cardId) => {
+    if (ptys.isLive(cardId) && (mailWaiting.get(cardId) ?? 0) > 0) return
+    markMailRead(cardId)
+  },
+  promptSubmitted: (cardId) => promptSubmitted(cardId),
+  cliStarted: (cardId) => cliStarted(cardId),
+  shuttingDown: () => leaving,
+  hookSeen: (cardId, type, event) => {
+    const s = store.getSession(cardId)
+    if (s) watchdog.onHook(cardId, s.projectId, s.title, type, event)
+    /*
+     * A subagent's tool calls arrive under its parent card, marked with `agent_type`, and say nothing
+     * about the parent's own prompt. A background subagent's PreToolUse after the parent's Stop was
+     * read two ways it must not be: as an open permission prompt (so a queued notice was never typed),
+     * and as the parent submitting a notice just typed at it (so the notice was marked read and left
+     * sitting unsent in the composer). The owner saw the second on 24 September, with .5Orche2
+     * running three to five background subagents at a time.
+     */
+    if (fromSubagent(event)) return
+    lastHook.set(cardId, { type, at: Date.now() })
+    /*
+     * A turn starting is the submit, whether or not UserPromptSubmit reached Garden. Under load on
+     * 23 September cards went to work on the notice while Garden still held it unsent, and the
+     * Keeper's give-up findings were false. Only for a line typed at an idle card: a working card's
+     * tool calls belong to the turn it was already in.
+     */
+    if (type === 'PreToolUse' || type === 'Stop') {
+      const u = wakeUnsent.get(cardId)
+      if (u?.idle && Date.now() - u.at > 250) promptSubmitted(cardId)
+    }
+  },
   ensureCardMemory: (session) => {
     ensureCardMemory(session)
   },
 })
 
 const http = createServer((req, res) => {
+  watchdog.note(`${req.method} ${(req.url ?? '').split('?')[0]}`)
   /*
    * Where an agent hands work to another card.
    *
@@ -7009,7 +8554,7 @@ const http = createServer((req, res) => {
               'which replaces it.',
           )
         }
-        const refusal = overCeiling(project.id, null, true)
+        const refusal = overCeiling(project.id, null, true, true)
         if (refusal) {
           recordCeilingRefusal(from.id, null, card.title, refusal)
           return answer(409, refusal.said)
@@ -7025,9 +8570,31 @@ const http = createServer((req, res) => {
       const title = String(msg?.title ?? '').trim()
       const role = String(msg?.role ?? '').trim()
       const roots = String(msg?.roots ?? '').trim()
+      const adapterId = isAdapterId(msg?.adapterId) ? msg.adapterId : 'claude'
       if (!title) return answer(400, 'a card needs a title')
-      if (!ROLE_POWERS[role]) {
-        return answer(400, `there is no "${role}" role. Garden has: ${Object.keys(ROLE_POWERS).join(', ')}.`)
+      /*
+       * A role is a deny list, and the deny list belongs to the CLI that reads it. Only the Claude
+       * CLI reads one, and it reads it once at launch, so a Claude card must be told which set it
+       * starts with and there is no safe default. Codex never consults it: `codexAdapter.launch`
+       * does not look at the role, so a role on a Codex card is a label with nothing behind it.
+       *
+       * `roleClass` is declared `RoleClass | null` and `roots.ts` handles null everywhere it matters
+       * (`ROLE_SKILLS[...] ?? DEFAULT_SKILLS`, a null role file, the reading index), so a card with
+       * no role has always been a state this board supports. Two layers refused to create one: the
+       * hire shim, and this check, which turns a null role into "" via String(null ?? '') and then
+       * fails to find "" in ROLE_POWERS. That is why PC1's three Codex cards could not be imported.
+       *
+       * A non-Claude card may still NAME a role, and if it does it must be a real one: a typo should
+       * be refused rather than silently recorded as no role at all.
+       */
+      if (role ? !ROLE_POWERS[role] : adapterId === 'claude') {
+        return answer(
+          400,
+          role
+            ? `there is no "${role}" role. Garden has: ${Object.keys(ROLE_POWERS).join(', ')}.`
+            : `a claude card needs a role. Garden has: ${Object.keys(ROLE_POWERS).join(', ')}. ` +
+                `A codex card may be created without one, because it has no deny list to choose.`,
+        )
       }
       if (!roots) return answer(400, 'a card needs roots. Say what it is for, on stdin.')
 
@@ -7088,7 +8655,7 @@ const http = createServer((req, res) => {
           `Roots it asked for:\n\n${roots}\n\n` +
           'Create it with GARDEN_HIRE if you agree, adjusting anything you disagree with, or reply ' +
           'along this wire saying why not.'
-        postMessage(orchestrator, from.title, ask, { kind: 'question', fromId: from.id })
+        fileMail(orchestrator, from.title, ask, { kind: 'question', fromId: from.id })
         const outcome = wakeForMail(orchestrator.id)
         recordSent(from.id, orchestrator.title, ask, { kind: 'question', outcome: SENT_NOTE[outcome] })
 
@@ -7147,9 +8714,10 @@ const http = createServer((req, res) => {
         {
           t: 'session.create',
           projectId: project.id,
-          adapterId: isAdapterId(msg?.adapterId) ? msg.adapterId : 'claude',
+          adapterId,
           title,
-          roleClass: role as never,
+          // Empty means no role, which is null on the card rather than "" (see the check above).
+          roleClass: (role || null) as never,
           reportsTo: parent && parent.projectId === project.id ? parent.id : null,
           modelChoice: msg?.model ? String(msg.model) : null,
           effortChoice: msg?.effort ? String(msg.effort) : null,
@@ -7183,8 +8751,15 @@ const http = createServer((req, res) => {
       if (body.length > 512 * 1024) req.destroy()
     })
     req.on('end', () => {
+      // Set once the sender is resolved, so a caller whose token is stale learns it from the reply
+      // rather than running unverified forever. A header, not the body: the body is prose a card
+      // reads, and adding machine fields to it would break every reader of it.
+      let senderUnverified = false
       const answer = (code: number, text: string) => {
-        res.writeHead(code, { 'content-type': 'text/plain' })
+        res.writeHead(code, {
+          'content-type': 'text/plain',
+          ...(senderUnverified ? { 'x-garden-sender-unverified': '1' } : {}),
+        })
         res.end(text)
       }
       let msg: any
@@ -7200,6 +8775,7 @@ const http = createServer((req, res) => {
        */
       const sender = resolveSender(req, msg)
       if (!sender.ok) return answer(sender.code, sender.reason)
+      senderUnverified = sender.unverified === true
       const from = sender.card
 
       const wanted = String(msg?.to ?? '').trim()
@@ -7218,7 +8794,25 @@ const http = createServer((req, res) => {
        */
       const open = inProject.filter((x) => x.closedAt === null)
       const byName = (list: TerminalSession[]) => list.find((x) => x.title.toLowerCase() === wanted.toLowerCase())
-      const to = inProject.find((x) => x.id === wanted) ?? byName(open) ?? byName(inProject)
+      /*
+       * A card on another project's board, when a wire joins them.
+       *
+       * `garden-wire.mjs` draws a wire across projects and PEERS.md then lists the far card, so a
+       * send that searched only the sender's own board refused the one card its brief said it could
+       * reach. The wire is what permits a message, so a wired card is found wherever it lives, and
+       * the wire check below still decides which way it may go. Unwired cards on other boards stay
+       * invisible, exactly as before.
+       */
+      const wiredAway = () => {
+        const peers = new Set(
+          store
+            .listWires()
+            .flatMap((w) => (w.sourceId === from.id ? [w.targetId] : w.targetId === from.id ? [w.sourceId] : [])),
+        )
+        const far = store.listSessions().filter((x) => peers.has(x.id) && x.projectId !== from.projectId)
+        return far.find((x) => x.id === wanted) ?? byName(far.filter((x) => x.closedAt === null))
+      }
+      const to = inProject.find((x) => x.id === wanted) ?? byName(open) ?? byName(inProject) ?? wiredAway()
       if (!to) {
         return answer(404, `no card called "${wanted}" on this board. Your PEERS.md lists who you may send to.`)
       }
@@ -7246,7 +8840,7 @@ const http = createServer((req, res) => {
        * The sender is told plainly rather than left to assume somebody is reading.
        */
       if (to.closedAt !== null) {
-        postMessage(to, from.title, text, { kind, taskId, fromId: from.id })
+        fileMail(to, from.title, text, { kind, taskId, fromId: from.id })
         recordSent(from.id, to.title, text, { kind, taskId, outcome: 'the card is closed, nothing is reading it' })
         return answer(
           200,
@@ -7329,7 +8923,7 @@ const http = createServer((req, res) => {
        * card with no process, a card mid-restart, and a card that read the message and replied all
        * produced the same sentence and the same record.
        */
-      postMessage(to, from.title, text, { kind, taskId, fromId: from.id })
+      fileMail(to, from.title, text, { kind, taskId, fromId: from.id })
       const outcome = wakeForMail(to.id)
       recordSent(from.id, to.title, text, { kind, taskId, outcome: SENT_NOTE[outcome] })
       const event = {
@@ -7737,6 +9331,56 @@ const http = createServer((req, res) => {
     return
   }
 
+  /*
+   * The Keeper's door. Only the card titled Keeper, by its own token, or the owner by his key; no
+   * other card may act as the overseer, which is why this does not fall back to the body's claim.
+   */
+  if (req.method === 'POST' && req.url === '/keeper') {
+    let body = ''
+    req.on('data', (c) => {
+      body += c
+      if (body.length > 64 * 1024) req.destroy()
+    })
+    req.on('end', () => {
+      const reply = (code: number, payload: unknown) => {
+        res.writeHead(code, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(payload))
+      }
+      const offeredKey = req.headers['x-garden-owner-key']
+      const owner = typeof offeredKey === 'string' && offeredKey.trim() === ownerKey()
+      const caller = cardForToken(bearerOf(req))
+      const keeper = keeperCard()
+      if (!owner && !(caller && keeper && caller.id === keeper.id)) {
+        return reply(403, { ok: false, reason: 'only the Keeper card, or the owner, may use this' })
+      }
+      let msg: any
+      try {
+        msg = JSON.parse(body || '{}')
+      } catch {
+        return reply(400, { ok: false, reason: 'that was not JSON' })
+      }
+      const { code, body: out } = keeperOp(msg)
+      reply(code, out)
+    })
+    return
+  }
+
+  /*
+   * Test boards only: block the event loop on purpose, so the stall sensor can be watched catching a
+   * real freeze. Absent unless the server was started with GARDEN_WATCHDOG_TEST=1, which the live
+   * board never is.
+   */
+  if (process.env.GARDEN_WATCHDOG_TEST === '1' && req.method === 'POST' && (req.url ?? '').startsWith('/watchdog/stall')) {
+    const ms = Math.min(5000, Number(new URL(req.url!, 'http://x').searchParams.get('ms')) || 800)
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      // Deliberately busy.
+    }
+    res.writeHead(200)
+    res.end('stalled')
+    return
+  }
+
   if (req.url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: true, sessions: store.listSessions().length, app: builtAppExists(), build: BUILD }))
@@ -7842,6 +9486,8 @@ setInterval(() => {
  * of the two it is showing.
  */
 const tallies = new Map<string, TokenTally>()
+/** When the token reader last read each card, so a card that has printed nothing since is skipped. */
+const tokensReadAt = new Map<string, number>()
 
 setInterval(() => {
   for (const session of store.listSessions()) {
@@ -7854,6 +9500,13 @@ setInterval(() => {
      * token count from a run that ended, climbing or frozen, with nothing saying it was history.
      */
     if (!ptys.isLive(session.id)) continue
+    /*
+     * Nothing new printed, nothing new to read. This reader was 11.7 s of every 120 s during the
+     * 23 September validation run, rescanning the same 32 KB of every quiet card once a second.
+     */
+    const printed = lastByteAt.get(session.id) ?? 0
+    if (printed <= (tokensReadAt.get(session.id) ?? -1)) continue
+    tokensReadAt.set(session.id, Date.now())
     // The tail, not the whole buffer. The figures this looks for are drawn at the bottom of the
     // screen, so the rest never held an answer it does not already have. Measured at about 0.10 ms
     // per full-buffer scan, so this was never the stutter it looked like; see `TOKEN_TAIL_BYTES`.
@@ -8134,7 +9787,13 @@ http.listen(port, '127.0.0.1', () => {
  * one day's evidence: being wrong that way strands a job nobody notices, and being wrong the other
  * way costs one unnecessary start.
  */
-const WORTH_REVIVING = new Set(['working', 'starting', 'needs-input'])
+/*
+ * 2026-09-29, the owner: "i want restarting session to bring back all sessions that were alive before
+ * reset". So `idle` is in, which makes this every status `markAllExitedOnBoot` returns. The reasoning
+ * above was his to overrule and he has: the cost is real, and he chose the board coming back as he
+ * left it. Canon 03 revision 14. Kept as a set rather than deleted so the choice stays visible.
+ */
+const WORTH_REVIVING = new Set(['working', 'starting', 'needs-input', 'idle'])
 
 function revive() {
   if (process.env.GARDEN_REVIVE === '0') return

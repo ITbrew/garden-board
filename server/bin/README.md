@@ -112,7 +112,27 @@ and cannot be wired afterwards, and only the owner can draw a wire between two e
 ## `garden-restart.mjs` — not for cards
 
 **This restarts the Garden SERVER, not a card.** It is launched detached by the server itself and
-waits on the port actually closing. **A card has no reason to run it.**
+waits on the port actually closing. **A card has no reason to run it.** The one beside it, below, is
+the one a card wants.
+
+---
+
+## `garden-restart-board.mjs` — press Restart server, on the owner's word
+
+```
+node "%GARDEN_BIN%\garden-restart-board.mjs"
+```
+
+Sends the board the exact message the Restart server button sends, and the server then launches
+`garden-restart.mjs` for itself. **Only when the owner has asked for it.** This ends every card on
+the board including the one that ran it: the cards that were running come back with revive, their
+work in flight does not. **Write your notes before the send, not after.**
+
+Reaches `127.0.0.1` only, so it is always this machine's board and never the other PC's.
+
+Afterwards, three checks, and report the numbers rather than the word "restarted": `build.commit`
+from `/health` equals `HEAD`, `build.startedAt` moved, and 5177 answers 200. Without the second one,
+"it answers" may only mean the old process never went away. The `board-restart` skill has the rest.
 
 ---
 

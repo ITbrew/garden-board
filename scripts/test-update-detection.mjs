@@ -245,7 +245,16 @@ const pastCache = () => sleep(3400)
 if (!CLAUDE_VERSION) {
   skip('the installed version is read off the executable', 'claude is not on PATH on this machine')
 } else {
-  const card = board.sessions.find((s) => s.id === ver.id)
+  /*
+   * The probe runs in the background since 1.1.45 (it used to hold the whole server while
+   * `claude --version` answered), and the version reads unknown until it does, so this waits for it.
+   */
+  let card = board.sessions.find((s) => s.id === ver.id)
+  for (let i = 0; i < 20 && card.installedVersion !== CLAUDE_VERSION; i++) {
+    await sleep(1000)
+    board = await readBoard()
+    card = board.sessions.find((s) => s.id === ver.id)
+  }
   check('the installed version is read off the executable', card.installedVersion === CLAUDE_VERSION,
     `card says ${card.installedVersion}, the executable says ${CLAUDE_VERSION}`)
 }

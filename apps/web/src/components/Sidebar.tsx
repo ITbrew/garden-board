@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import { drawnOnBoard, modelAndEffort, type TerminalSession } from '@garden/shared'
+import { drawnOnBoard, modelAndEffort, runningOnBoard, type TerminalSession } from '@garden/shared'
 import { actions, getLayouts, getLimits, getLoops, onLayouts, onLimits, onLoops, useApp } from '../state'
+import { HealthPanel } from './HealthPanel'
 import { LimitsPanel } from './LimitsPanel'
 import { LoopsPanel } from './LoopsPanel'
 /*
@@ -84,26 +85,38 @@ export function Sidebar({ onFold }: { onFold?: () => void }) {
   }, [activeProjectId])
 
   /*
-   * The ceiling and what counts against it.
+   * The ceiling, from the server, and what stands against it, measured here.
    *
-   * `counted` only moves when this panel actually asks: the server re-sends it unprompted after
-   * `limits.set` changes the ceiling, but not after a plain `session.create` or `session.delete`
-   * changes what is counted (see the note on `boardLimits` in state.ts). Watching the open-card
-   * count for this project and asking again whenever it moves is what keeps "4 of 12" from going
-   * stale the moment a card is made or closed.
+   * Only the ceiling travels. The counts used to come with it, as a snapshot refreshed whenever
+   * this panel asked, and it asked on two triggers: the board changing, and the number of open
+   * cards on it changing. A card going from idle to working is neither, so on 2026-09-29 the
+   * header said one card was running and the ceiling directly below it said "0 of 5". Nothing was
+   * broken and nothing said so, which is exactly how a live control comes to look dead.
+   *
+   * So the two counts are derived from the cards this tab already holds, through the same two
+   * functions in `@garden/shared` that `store.countCards` and `store.countRunning` spell out in
+   * SQL. They cannot lag, because there is nothing left to lag behind, and they cannot disagree
+   * with what the server will refuse, because both are reading the same two rules.
+   *
+   * `refreshLimits` still runs on a board change, for the ceiling values themselves on a tab this
+   * window has not seen yet. The server keeps sending `counted` and this file keeps ignoring it,
+   * which is deliberate: an older or newer server changes nothing here either way.
    */
   const limitsData = useSyncExternalStore(
     onLimits,
     () => getLimits(activeProjectId),
     () => undefined,
   )
-  const openCardCount = useMemo(
-    () => sessions.filter((s) => s.projectId === activeProjectId && s.closedAt === null).length,
-    [sessions, activeProjectId],
-  )
+  const counted = useMemo(() => {
+    const mine = sessions.filter((s) => s.projectId === activeProjectId)
+    return {
+      cards: mine.filter(drawnOnBoard).length,
+      running: mine.filter(runningOnBoard).length,
+    }
+  }, [sessions, activeProjectId])
   useEffect(() => {
     if (activeProjectId) actions.refreshLimits(activeProjectId)
-  }, [activeProjectId, openCardCount])
+  }, [activeProjectId])
 
   // The loops on this board. The server pushes the list after every change and firing; this
   // asks once per board so the section is not blank until the first firing.
@@ -215,6 +228,8 @@ export function Sidebar({ onFold }: { onFold?: () => void }) {
           ‹
         </button>
       )}
+      <HealthPanel />
+
       <section className="rail-section">
         <h3 className="rail-title">New terminal</h3>
         <div className="launchers">
@@ -260,8 +275,18 @@ export function Sidebar({ onFold }: { onFold?: () => void }) {
       */}
       {active && limitsData && (
         <section className="rail-section">
-          <h3 className="rail-title">Ceiling</h3>
-          <LimitsPanel projectId={active.id} limits={limitsData.limits} counted={limitsData.counted} />
+          {/*
+            The heading names the board, because that was the owner's actual question about this
+            section: "make sure those settings are per tab, not entire garden". They are, and they
+            always were, stored and enforced per project. What was missing was any statement of it
+            where he was standing. Three numbers sat on one screen counting three different
+            populations, the header's across every tab, the tab badge's including spent subagents,
+            and this one neither, and none of them said which.
+          */}
+          <h3 className="rail-title">
+            Ceiling<span className="rail-title__of">{active.name}</span>
+          </h3>
+          <LimitsPanel projectId={active.id} boardName={active.name} limits={limitsData.limits} counted={counted} />
         </section>
       )}
 

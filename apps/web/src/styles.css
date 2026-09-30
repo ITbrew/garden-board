@@ -126,6 +126,21 @@ body {
 }
 
 /*
+ * The board a section's numbers were counted over, beside the section's name.
+ *
+ * Not uppercase, unlike the heading it sits in, because it is a proper name and the tab above
+ * spells it in its own case. Dimmer and not letter-spaced, so the eye reads one heading with a
+ * qualifier rather than two headings.
+ */
+.rail-title__of {
+  margin-left: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.62;
+  font-weight: 500;
+}
+
+/*
  * A rail title that folds its section away.
  *
  * The twisty sits in the title rather than beside it, so the whole line reads as one control and
@@ -559,8 +574,17 @@ body {
  * card itself stays fully solid: activity is shown by the edge going round and by the wires
  * touching it lighting up, never by making the card see-through.
  *
- * Drawn as a rotating conic gradient behind the card, masked to a one pixel ring, so the card
- * body and everything in it are untouched and no layout moves.
+ * Drawn as a ring masked out of the card's edge, painted in the role colour through white, whose
+ * brightness steps with the board's heartbeat (pulse.ts): an attribute on the root flipped about once
+ * a second. Not a CSS animation, because on this page any running CSS animation keeps the browser
+ * drawing 85 to 120 frames a second and re-assigning layers for the whole board on each one. Measured
+ * on 23 September with four working cards, main thread per second:
+ * - the ring's gradient angle animated through a registered custom property: about 320 ms, and a
+ *   re-paint of every busy card on every frame, while the owner's game ran at 5 fps beside it;
+ * - the gradient on a square layer three card-widths across, turned by a transform: about 960 ms;
+ * - opacity, stepped or smooth, and a stepped painted colour: 340 to 990 ms;
+ * - nothing animating: 95 to 340 ms, at 4 to 11 frames a second.
+ * A beat costs one style pass and one paint.
  */
 .node.is-busy::before {
   content: '';
@@ -569,16 +593,12 @@ body {
      edge would be cut away entirely and nothing would appear to happen. */
   inset: 0;
   border-radius: 8px;
-  /* The card's own role colour travels round it, so a working coder, orchestrator and reviewer
-     are told apart by colour while all three are equally obviously busy. */
+  /* The card's own role colour, so a working coder, orchestrator and reviewer are told apart by
+     colour while all three are equally obviously busy. */
   background: conic-gradient(
-    from var(--spin, 0deg),
     var(--role-color, var(--accent)) 0deg,
-    #ffffff 25deg,
-    #ffffff 70deg,
+    #ffffff 45deg,
     var(--role-color, var(--accent)) 120deg,
-    transparent 215deg,
-    transparent 330deg,
     var(--role-color, var(--accent)) 360deg
   );
   /* Ring only: the middle is punched out so nothing paints over the card. */
@@ -590,103 +610,42 @@ body {
   /* Three pixels, not one and a half. The ring was legible on the card and invisible from the
      other side of the screen, which is where this board is actually read from. */
   padding: 3px;
-  animation: node-spin 2.4s linear infinite;
+  opacity: 0.4;
   pointer-events: none;
   z-index: 0;
 }
+/* The beat: full strength on every other second. */
+:root[data-pulse] .node.is-busy::before { opacity: 1; }
 .node.is-busy > * { position: relative; z-index: 1; }
 
 /*
- * A second layer, outside the card: the role colour breathing around it.
+ * A second layer, outside the card: the role colour glowing around it.
  *
  * It cannot be a pseudo-element. `.node` sets `overflow: hidden` so its rounded corners hold the
  * preview, and that clips a child's shadow away entirely; an element's own box-shadow is not
  * clipped by its own overflow, so the glow belongs on `.node` itself. The card keeps its ordinary
- * lift (the black drop shadow) inside the same animation, because an animated `box-shadow`
- * replaces the property outright and dropping the lift would make a busy card look flat.
+ * lift (the black drop shadow) beside it.
  *
- * Breathing rather than steady, on a slow two second ease, so that a board of several working cards
- * is still one signal and not a wall of light. Nothing inside the card moves and the body stays
- * solid, which is the rule the ring already follows.
+ * Steady, at the middle of the old breath. It used to breathe between 8 and 22 pixels, and an
+ * animated box-shadow is re-painted on every frame for every busy card; the ring already carries the
+ * motion, so the glow only has to say which cards are working. Steady also serves a reader who has
+ * asked for less motion without a rule of its own.
  */
-.node.is-busy { animation: node-breathe 2s ease-in-out infinite; }
-
-@keyframes node-breathe {
-  0%, 100% {
-    box-shadow:
-      0 6px 20px rgba(0, 0, 0, 0.45),
-      0 0 8px var(--role-color, var(--accent));
-  }
-  50% {
-    box-shadow:
-      0 6px 20px rgba(0, 0, 0, 0.45),
-      0 0 22px var(--role-color, var(--accent));
-  }
+.node.is-busy {
+  box-shadow:
+    0 6px 20px rgba(0, 0, 0, 0.45),
+    0 0 14px var(--role-color, var(--accent));
 }
 
-/*
- * Busy and focused at once has to read as both.
- *
- * A CSS animation beats a normal declaration in the cascade, so the breathing above would quietly
- * eat the focused card's accent ring and leave no way to tell which card the terminal below belongs
- * to. This says both in one animation instead: the focus ring stays exactly as `.is-focused` draws
- * it, with the same breath around it.
- */
-.node.is-busy.is-focused { animation: node-breathe-focused 2s ease-in-out infinite; }
-
-@keyframes node-breathe-focused {
-  0%, 100% {
-    box-shadow:
-      0 0 0 1px var(--accent),
-      0 6px 24px rgba(124, 92, 255, 0.25),
-      0 0 8px var(--role-color, var(--accent));
-  }
-  50% {
-    box-shadow:
-      0 0 0 1px var(--accent),
-      0 6px 24px rgba(124, 92, 255, 0.25),
-      0 0 22px var(--role-color, var(--accent));
-  }
+/* Busy and focused at once has to read as both: the focus ring exactly as `.is-focused` draws it,
+   with the same glow around it. */
+.node.is-busy.is-focused {
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 6px 24px rgba(124, 92, 255, 0.25),
+    0 0 14px var(--role-color, var(--accent));
 }
 
-/* A reader who has asked for less motion gets the glow held at its bright end rather than
-   breathing, so the signal is not weaker for them. The travelling ring is left as it was before
-   this change; it is not mine to quietly settle here. */
-@media (prefers-reduced-motion: reduce) {
-  .node.is-busy {
-    animation: none;
-    box-shadow:
-      0 6px 20px rgba(0, 0, 0, 0.45),
-      0 0 22px var(--role-color, var(--accent));
-  }
-  .node.is-busy.is-focused {
-    animation: none;
-    box-shadow:
-      0 0 0 1px var(--accent),
-      0 6px 24px rgba(124, 92, 255, 0.25),
-      0 0 22px var(--role-color, var(--accent));
-  }
-}
-
-@property --spin {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
-
-@keyframes node-spin {
-  to { --spin: 360deg; }
-}
-
-/* A browser without registered custom properties cannot animate the gradient angle, so the ring
-   rotates as a whole element instead. Same signal, one fewer moving part. */
-@supports not (background: conic-gradient(from var(--spin, 0deg), red, blue)) {
-  .node.is-busy::before { animation: node-spin-fallback 2.4s linear infinite; }
-  @keyframes node-spin-fallback {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-}
 
 .node.is-focused { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 6px 24px rgba(124, 92, 255, 0.25); }
 /*
@@ -803,6 +762,22 @@ body {
   flex: 0 0 auto;
 }
 .dock-title { font-weight: 600; }
+/*
+ * Said in the header, because a terminal with stdin disabled looks exactly like a working one: the
+ * last screen the process drew is still on it and the cursor is still where it stopped. Without a
+ * word for it, the only signal is that typing does nothing, which reads as the app being broken.
+ */
+.dock-off {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.06));
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .dock-cwd {
   flex: 1;
   color: var(--text-faint);
@@ -814,6 +789,29 @@ body {
   text-align: left;
 }
 
+.dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+/* Over the input row of a card that is off. Canon 03 revision 12. */
+.dock-offbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg-raised);
+  border-top: 2px solid var(--accent);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+}
+/*
+ * The last screen stays readable but stops looking live. A blind read of the first version said the
+ * bright prompt and cursor "read as active, which contradicts the off message".
+ */
+.dock-body--off .term-host { opacity: 0.45; }
 .term-host { flex: 1; min-height: 0; padding: 4px 6px; background: #0b0d12; overflow: hidden; }
 .term-surface { height: 100%; width: 100%; }
 .term-host .xterm { height: 100%; }
@@ -1172,20 +1170,28 @@ body {
 .node.is-off .node-body { filter: saturate(0.5) brightness(0.82); }
 
 /* The header pill: just the short word, so it never competes with the title for space. A coloured
-   word alone was not enough to catch at a distance, so it also gets a slow pulse. */
+   word alone was not enough to catch at a distance, so it also gets a slow pulse: a fixed glow that
+   shows on the board's heartbeat (pulse.ts), not a CSS animation, for the reason given at the
+   working ring. */
 .node-status--alert {
+  position: relative;
   display: inline-flex;
   align-items: center;
   padding: 1px 7px;
   border-radius: 999px;
   background: rgba(245, 158, 11, 0.16);
   border: 1px solid rgba(245, 158, 11, 0.5);
-  animation: alert-pulse 1.6s ease-in-out infinite;
 }
-@keyframes alert-pulse {
-  0%, 100% { box-shadow: 0 0 0 rgba(245, 158, 11, 0); }
-  50% { box-shadow: 0 0 9px rgba(245, 158, 11, 0.55); }
+.node-status--alert::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: 999px;
+  box-shadow: 0 0 9px rgba(245, 158, 11, 0.55);
+  opacity: 0;
+  pointer-events: none;
 }
+:root[data-pulse] .node-status--alert::after { opacity: 1; }
 
 /* The one thing the owner has to be able to spot across a full board: which card is blocked on
    him, why, and for how long. It gets a full-width row of its own, below the header, so a long
@@ -1202,6 +1208,25 @@ body {
   color: var(--warn);
 }
 .node-alert__headline { font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; font-size: 10.5px; }
+
+/*
+ * Unread mail. Same shape as the needs-you banner because it is the same kind of fact, in a
+ * different colour because it is not the same urgency: a card with mail waiting is not blocked, it
+ * simply has something it has not been shown. Amber is reserved for "the owner has to act now".
+ */
+.node-unread {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 9px;
+  background: rgba(96, 165, 250, 0.13);
+  border-bottom: 1px solid rgba(96, 165, 250, 0.36);
+  font-size: 11.5px;
+  color: #93c5fd;
+}
+.node-unread__headline { font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; font-size: 10.5px; }
+.node-unread__count { color: var(--text); }
 .node-alert__reason { color: var(--text); }
 .node-alert__since { color: var(--text-dim); margin-left: auto; }
 
@@ -1227,6 +1252,18 @@ body {
 }
 .agent-summary__row { display: flex; gap: 8px; }
 .agent-summary__row--muted { color: var(--text-faint); font-style: italic; }
+/*
+ * The line above the first row: where the conversation begins, or that earlier turns are on their
+ * way. Set apart from the rows below it so it reads as a boundary of the list rather than as the
+ * first thing that was said.
+ */
+.agent-summary__edge {
+  display: block;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px dashed var(--border);
+  font-size: 0.92em;
+}
 .agent-summary__label { color: var(--text-faint); min-width: 56px; flex: 0 0 auto; }
 
 /*
@@ -1385,6 +1422,50 @@ body {
   cursor: pointer;
 }
 .mini-follow:hover { color: var(--text); border-color: var(--accent, #7c5cff); }
+/*
+ * A Claude card's terminal: the conversation scrolls above and the CLI's live lines sit under it
+ * (ClaudeTerminal, canon 02 revision 13). The conversation wraps, since it is text rather than a
+ * screen, so the right-edge fade moves to the live lines, which still clip like a terminal.
+ */
+.mini--claude {
+  justify-content: flex-start;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+.claude-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-anchor: none;
+  scrollbar-width: thin;
+  scrollbar-color: #4a536b transparent;
+  padding-right: 4px;
+}
+.claude-log__edge { color: var(--text-faint); font-style: italic; margin-bottom: calc(var(--card-font, 11px) + 4px); }
+.claude-turn {
+  display: grid;
+  grid-template-columns: 2ch minmax(0, 1fr);
+  margin-bottom: calc(var(--card-font, 11px) + 4px);
+  color: #e3e7f0;
+}
+.claude-turn__text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.claude-turn--asked { color: #8d96ab; }
+.claude-turn--did .claude-turn__mark { color: #4ec97a; }
+.claude-turn--did { color: #b3bcd1; }
+.claude-turn--did b { color: #e3e7f0; font-weight: 600; }
+/* Never more than half the body, so a small card still shows conversation; the bottom (the prompt
+   box and status line) is what stays when it is cut. */
+.claude-live {
+  flex: 0 0 auto;
+  max-height: 50%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent 100%);
+}
+.claude-live .mini-row { flex-shrink: 0; }
 .mini-row {
   white-space: pre;
   overflow: hidden;
@@ -1512,7 +1593,12 @@ button.port-dot {
   border-color: var(--line);
   color: var(--text);
 }
+/* Dragging a tab: the tab being moved dims, and a bar marks the side it will land on. Canon 02 revision 17. */
+.tab.is-dragging { opacity: 0.4; }
+.tab.drop-before { box-shadow: inset 3px 0 0 var(--accent, #7c5cff); }
+.tab.drop-after { box-shadow: inset -3px 0 0 var(--accent, #7c5cff); }
 .tab--add { color: var(--text-faint); font-size: 15px; padding: 0 12px; }
+.tab--add:disabled { opacity: 0.5; cursor: default; }
 .tab-swatch { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 8px; }
 .tab-name { font-weight: 600; }
 .tab-count {
@@ -3231,3 +3317,116 @@ button.port-dot {
 .node.is-tinted.is-off .node-meta {
   background: color-mix(in srgb, var(--role-color) 4%, var(--bg-node));
 }
+
+/* The Health section: what the watchdog noticed. docs/canonical/27-the-overseer.md. */
+.rail-title__count.is-warn { color: var(--warn); }
+.health { gap: 4px; }
+.health-row { position: relative; border-radius: var(--radius); background: var(--bg-raised); }
+.health-row__main {
+  display: flex; gap: 8px; align-items: flex-start; width: 100%; padding: 6px 26px 6px 8px;
+  background: none; border: 0; color: var(--text); text-align: left; cursor: pointer; font: inherit;
+}
+.health-row__dot { flex: none; width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: var(--text-faint); }
+.health-row--act .health-row__dot { background: var(--err); }
+.health-row--warn .health-row__dot { background: var(--warn); }
+.health-row--info .health-row__dot { background: var(--ok); }
+.health-row__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.health-row__title { font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+.health-row__meta { font-size: 10.5px; color: var(--text-dim); }
+.health-row__dismiss {
+  position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border: 0; border-radius: 4px;
+  background: none; color: var(--text-faint); cursor: pointer; font-size: 14px; line-height: 1;
+}
+.health-row__dismiss:hover { color: var(--text); background: var(--line); }
+.health-row__detail { padding: 0 8px 8px 23px; font-size: 11px; color: var(--text-dim); overflow-wrap: anywhere; }
+.health-row__detail p { margin: 0 0 4px; }
+.health-row__note { color: var(--text); }
+/* Health is the rail's first section, so its count has to clear the rail's own hide button. */
+.health-title { padding-right: 26px; }
+.health-keeper {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin: 0 0 6px; padding: 4px 6px 4px 8px; border-radius: 6px; background: var(--line);
+  font-size: 11px; color: var(--text-dim);
+}
+.health-keeper.is-paused { color: var(--warn); }
+.health-keeper__toggle {
+  flex: none; border: 0; border-radius: 4px; padding: 2px 8px; font-size: 11px;
+  background: none; color: var(--text); cursor: pointer;
+}
+.health-keeper__toggle:hover { background: var(--bg, rgba(0,0,0,.2)); }
+
+/* The overseer card: the Keeper's card, drawn as its own thing. Canon 27, "The overseer card". */
+.node.is-overseer {
+  --ov: var(--ok);
+  border-color: color-mix(in srgb, var(--ov) 55%, var(--line));
+  background: color-mix(in srgb, var(--ov) 4%, var(--bg-node));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ov) 20%, transparent), 0 8px 28px rgba(0, 0, 0, 0.5);
+}
+.node.is-overseer .node-head { background: color-mix(in srgb, var(--ov) 10%, var(--bg-raised)); }
+.node-title__eye { color: var(--ov); margin-right: 6px; font-size: 11px; }
+.ov {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px 12px;
+  display: flex; flex-direction: column; gap: 12px; font-size: 12px; color: var(--text);
+}
+.ov--empty { color: var(--text-dim); }
+.ov h4 {
+  margin: 0 0 6px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-dim);
+}
+.ov-quiet { margin: 4px 0 0; color: var(--text-faint); font-size: 11px; }
+.ov-btn {
+  flex: none; border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 4px 12px;
+  background: var(--bg-raised); color: var(--text); font-size: 11.5px; cursor: pointer;
+}
+.ov-btn:hover { border-color: var(--ov, var(--accent)); }
+.ov-now {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
+  background: color-mix(in srgb, var(--ov) 10%, var(--bg-raised));
+}
+.ov-now--paused { background: color-mix(in srgb, var(--warn) 12%, var(--bg-raised)); }
+.ov-now--asleep { background: var(--bg-raised); }
+.ov-now__dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--ov); }
+.ov-now--watching .ov-now__dot { box-shadow: 0 0 0 4px color-mix(in srgb, var(--ov) 25%, transparent); }
+.ov-now--paused .ov-now__dot { background: var(--warn); }
+.ov-now--asleep .ov-now__dot { background: var(--text-faint); }
+.ov-now__text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ov-now__text strong { font-size: 13px; }
+.ov-now__text span { color: var(--text-dim); font-size: 11.5px; }
+.ov-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ov-item {
+  position: relative; display: flex; gap: 8px; padding: 6px 28px 6px 8px; border-radius: 6px;
+  background: var(--bg-raised);
+}
+.ov-item__dot { flex: none; width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: var(--text-faint); }
+.ov-item--act .ov-item__dot { background: var(--err); }
+.ov-item--warn .ov-item__dot { background: var(--warn); }
+.ov-item--info .ov-item__dot { background: var(--ok); }
+.ov-item__text, .ov-done__what { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ov-item__title { line-height: 1.35; overflow-wrap: anywhere; }
+.ov-item__meta { font-size: 10.5px; color: var(--text-dim); }
+.ov-item__note { font-size: 11px; color: var(--text-dim); overflow-wrap: anywhere; }
+.ov-x {
+  position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border: 0; border-radius: 4px;
+  background: none; color: var(--text-faint); cursor: pointer; font-size: 14px; line-height: 1;
+}
+.ov-x:hover { color: var(--text); background: var(--line); }
+.ov-meters { display: flex; flex-direction: column; gap: 6px; }
+.ov-meter { display: grid; grid-template-columns: 80px 1fr auto; align-items: center; gap: 8px; }
+.ov-meter__label { color: var(--text-dim); font-size: 11px; }
+.ov-meter__bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.ov-meter__bar span { display: block; height: 100%; background: var(--ov, var(--ok)); border-radius: 3px; }
+.ov-meter.is-warn .ov-meter__bar span { background: var(--warn); }
+.ov-meter__text { font-size: 11px; font-variant-numeric: tabular-nums; }
+.ov-top { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.ov-top li { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; font-size: 11px; }
+.ov-top__cards { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-top__pct { font-variant-numeric: tabular-nums; }
+.ov-rhythm { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 11px; }
+.ov-rhythm dt { color: var(--text-dim); }
+.ov-rhythm dd { margin: 0; }
+.ov-done { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.ov-done:last-child { border-bottom: 0; }
+.ov-done__when { flex: none; width: 64px; color: var(--text-faint); font-size: 10.5px; padding-top: 1px; }
+
+/* A card's input line showing what was typed in the dock pane and not yet sent (canon 02 r14). */
+.node-input input.node-input__mirror::placeholder { color: var(--text); opacity: 1; }

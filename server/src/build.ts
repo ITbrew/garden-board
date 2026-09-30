@@ -15,8 +15,8 @@
  * this is for.
  */
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -40,14 +40,39 @@ function readVersion(): string {
  * file exists to catch.
  */
 function readCommit(): string {
-  const git = (args: string[]) =>
-    execFileSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  const head = headFromFiles(repo)
+  if (!head) return 'nocommit'
   try {
-    const head = git(['rev-parse', '--short', 'HEAD'])
-    const dirty = git(['status', '--porcelain']).length > 0
+    const dirty =
+      execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+        .length > 0
     return dirty ? `${head}+` : head
   } catch {
-    return 'nocommit'
+    // The mark is a hint the header ignores when comparing; losing it is not worth losing the commit.
+    return head
+  }
+}
+
+/**
+ * The commit HEAD names, read from the repository's own files rather than by running git.
+ *
+ * Running git here failed on the owner's board after a restart, which starts this server, the page
+ * and every card that was running all at once: the server labelled itself "nocommit" while the page
+ * had the real commit, and the header said "builds differ" over two halves on the same code. Reading
+ * two small files cannot time out.
+ */
+function headFromFiles(repo: string): string | null {
+  try {
+    const head = readFileSync(join(repo, '.git', 'HEAD'), 'utf8').trim()
+    if (!head.startsWith('ref: ')) return /^[0-9a-f]{7,}$/.test(head) ? head.slice(0, 7) : null
+    const ref = head.slice(5)
+    const loose = join(repo, '.git', ...ref.split('/'))
+    if (existsSync(loose)) return readFileSync(loose, 'utf8').trim().slice(0, 7)
+    const packed = readFileSync(join(repo, '.git', 'packed-refs'), 'utf8')
+    const line = packed.split(/\r?\n/).find((l) => l.endsWith(' ' + ref))
+    return line ? line.slice(0, 7) : null
+  } catch {
+    return null
   }
 }
 

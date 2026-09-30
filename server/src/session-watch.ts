@@ -100,6 +100,14 @@ export function watchSessionFiles(deps: WatchDeps): NodeJS.Timeout {
       if (card.status === mapped.status && card.waitingFor === waitingFor) continue
       // A card whose process Garden already knows has exited is not revived by a stale file.
       if (card.pid === null) continue
+      /*
+       * Older news never overwrites newer. DEF side, 00:31:48 on 24 September: the Stop hook set it
+       * idle, this tick then read the file before the CLI rewrote it, still "busy since 23:59:12",
+       * and put it back to working with that time. The file's next word was "shell", which maps to
+       * nothing, so the card read working for over twenty minutes at an empty prompt and its mail
+       * notice could not be submitted.
+       */
+      if (file.statusUpdatedAt && card.statusSince && file.statusUpdatedAt < card.statusSince) continue
 
       const next: TerminalSession = {
         ...card,

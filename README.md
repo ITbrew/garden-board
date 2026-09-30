@@ -38,6 +38,63 @@ The startup line tells you which one you are in. Nothing else does.
 
 ---
 
+## Staying up to date
+
+```
+npm run update
+```
+
+Fetches, shows you what is incoming **before** taking it, fast-forwards, then installs only if the
+lockfile actually moved and builds only if something that ends up in a build actually moved. It
+finishes by saying whether a restart is needed.
+
+It refuses rather than guessing, in three cases, and changes nothing when it does:
+
+- **The tree is dirty.** It names the files and stops. It will not stash on your behalf, because
+  work a script moves is work it has to be trusted to put back.
+- **The branches have diverged.** It prints both sides and suggests `git rebase`, because a merge
+  commit on `master` produces a history that cannot be read back or bisected.
+- **The remote is unreachable.**
+
+**It never restarts the board.** It tells you a restart is needed and stops there. Restarting ends
+nothing on the board, but it is still your board and your timing.
+
+**The first time, pull by hand.** This script arrives in a commit, so a checkout older than that
+commit does not have it yet, and asking npm to run a script that is not there can do nothing without
+saying so. Once, on an old checkout:
+
+```
+git pull --ff-only origin master
+```
+
+After that `npm run update` is present and does the rest. The way to tell which you are on: a real
+run always prints `Garden update` and the path first. If you get nothing at all, you are on a
+checkout that predates the script, and nothing was pulled.
+
+If you run Garden on two machines, that is the whole routine: whoever changes it commits and pushes
+the same day, and the other runs `npm run update` before touching source.
+`.claude/skills/multi-pc-project-sync/SKILL.md` is the longer version, including what to check
+before discarding local commits.
+
+---
+
+## Running the tests
+
+```
+npm test
+```
+
+**It refuses to start while a board is open on this machine**, naming the ports, and runs nothing.
+The suite starts and stops real Gardens, and it has disturbed a live board before: a restart inside
+a test replaced the page half on the developer's own port while he was working. Close the board
+first. `--board-is-not-mine` is the way past it on a machine where 5177 and 5178 belong to something
+else.
+
+Three tests spawn a real CLI session and cost real tokens. They are held back unless you ask for
+them with `--paid`, and named in the summary either way rather than quietly skipped.
+
+---
+
 ## The rule this project exists to enforce
 
 **Never show the owner something Garden cannot prove.**
@@ -127,7 +184,7 @@ with a permission decision, which is what keeps one authority in charge.
 | Orchestrator | Edit, MultiEdit, NotebookEdit, Bash | yes | owns the canon, hires the boss, talks to you |
 | Boss | Write, Edit, MultiEdit, NotebookEdit | yes | takes a goal, hires managers, hands out departmental tasks |
 | Manager | Edit, MultiEdit, NotebookEdit, Bash | yes | plans a department's work and hires the specialists |
-| Worker | Agent, SendMessage, Task* | no | does the work; the only role that changes the repository |
+| Worker | Agent, SendMessage, Task* | no | does the work itself, with no subagents and nobody below it |
 | Reviewer | everything above plus Bash | no | reads and reports, and is called by the boss |
 
 **Bash is the entry that matters.** Denying Write and Edit does not stop a card writing a file

@@ -15,6 +15,17 @@ export interface AccountIdentity {
  * exists, and reading the wrong one is not harmless: the account guard in C:\Work\App\1.0
  * documents that doing so once produced a silent false all-clear.
  *
+ * A third candidate was added here on 2026-09-17 and removed the same day. It read the sibling
+ * `<configDir>.json`, because the owner reported every card showing "not signed in" and
+ * `~/.claude.json` was the only config file on the machine with an account in it. That reasoning
+ * was backwards. The chip was correct: `~/.claude/.claude.json`, which is the file the CLI itself
+ * looks for, had been backed up and left missing, so the directory genuinely was signed out. Every
+ * newly hired card was launching as a first-run install and freezing on the onboarding prompt.
+ * The fallback would have reported an account from a file the CLI was not reading, turning a true
+ * "not signed in" into a false "signed in" while no card on the board could start. A wrong account
+ * is the failure this function fears most, and a fallback that invents one from a neighbouring
+ * directory is how it happens. Fix the config, do not widen the search.
+ *
  * Only `oauthAccount` is touched, which holds no secret. Tokens live in `.credentials.json`,
  * which Garden never opens.
  */

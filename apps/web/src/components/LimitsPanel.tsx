@@ -166,17 +166,31 @@ function LimitChoice({
  */
 export function LimitsPanel({
   projectId,
+  boardName,
   limits,
   counted,
 }: {
   projectId: string
+  /**
+   * The tab these ceilings govern, named in the one row whose unit line used to say "this board".
+   *
+   * Every ceiling here is stored and enforced per project and always has been, and the owner still
+   * had to ask: "make sure those settings are per tab, not entire garden". A control that is
+   * correct and cannot be read as correct is not finished.
+   */
+  boardName: string
   limits: BoardLimits
   /*
-   * `subagents` is carried but not drawn. It is a per-project count of records and the row above is
-   * a per-card ceiling, so putting them together would assert a ratio neither number supports. It
-   * stays in the type because the server sends it and dropping it here would only hide that.
+   * Measured by the caller from the cards it holds, through the same shared predicates the server
+   * counts with, rather than arriving from the server as a snapshot. See the note in Sidebar.tsx:
+   * the snapshot refreshed on triggers that did not include a card starting work, so the running
+   * row read 0 while a card was working.
+   *
+   * No `subagents` here any more. It was carried and never drawn, because it is a per-project count
+   * of records and the row above it is a per-card ceiling, so the two assert a ratio neither
+   * supports. Carrying a figure nowhere in order to be seen carrying it is not honesty.
    */
-  counted: { cards: number; running: number; subagents?: number }
+  counted: { cards: number; running: number }
 }) {
   /*
    * Only the ceilings are sent back. `counted` is never spread into this, subagents included: what
@@ -290,7 +304,7 @@ export function LimitsPanel({
         label="Subagents allowed"
         hint="Whether cards on this board may dispatch subagents at all. This is the one subagent decision Garden holds itself: its hook refuses the dispatch before the subagent exists, and says which card was refused and where to change this. Set to No it takes effect on the very next dispatch, including on a card that is already running, which is what makes it different from a card's own permission to spawn agents. Nothing already running is stopped and no record is removed."
         value={limits.subagentsAllowed}
-        unit="everywhere on this board"
+        unit={`every card on ${boardName}`}
         locked={locked}
         onCommit={(v) => commit({ subagentsAllowed: v })}
       />

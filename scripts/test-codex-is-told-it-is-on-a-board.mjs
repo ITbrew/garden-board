@@ -64,21 +64,24 @@ check('and it says which card it is', cmd.includes('Assistant'))
  * shim carries three paragraphs about. So the text must not contain one, and that is a property of
  * the text rather than something a caller can be trusted to remember.
  */
-const quoted = cmd.slice(cmd.indexOf("'") + 1, cmd.lastIndexOf("'"))
+// The brief is its own single-quoted argument, the one naming PEERS.md, and it ends the command. The
+// start line also carries -c '...' options (1.1.51), so the first and last quote are not the brief's.
+const brief = cmd.match(/'([^']*PEERS\.md[^']*)'\s*$/)
+const quoted = brief ? brief[1] : ''
 check(
   'the brief carries no quote that would end its own string',
-  !quoted.includes("'") && !quoted.includes('"'),
+  !!brief && !quoted.includes('"'),
   quoted.length ? `${quoted.length} characters, none of them a quote` : '(nothing quoted)',
 )
 
 check(
   'a card with no mailbox is launched plain rather than with a broken pointer',
-  commandFor({}) === 'codex',
+  /^codex /.test(commandFor({})) && !commandFor({}).includes('PEERS.md'),
   commandFor({}),
 )
 check(
   'and GARDEN_CODEX_BRIEF=0 starts one silently, so a harness spends nothing',
-  commandFor(env, { brief: false }) === 'codex',
+  /^codex /.test(commandFor(env, { brief: false })) && !commandFor(env, { brief: false }).includes('PEERS.md'),
   commandFor(env, { brief: false }),
 )
 

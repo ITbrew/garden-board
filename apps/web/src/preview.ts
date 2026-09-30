@@ -52,6 +52,12 @@ interface Entry {
    * batch of new bytes and kept.
    */
   bottom: number
+  /**
+   * How the program wants mouse reports written, followed from its own output. xterm keeps this but
+   * does not publish it, and a card that hands the wheel to the program has to write the report in
+   * the form the program asked for. See `getPreviewMouse`.
+   */
+  mouseEncoding: 'default' | 'sgr' | 'sgr-pixels'
 }
 
 const entries = new Map<string, Entry>()
@@ -95,7 +101,26 @@ function entryFor(sessionId: string): Entry {
        */
       seq: -1,
       bottom: -1,
+      mouseEncoding: 'default',
     }
+    // Watch the program switch the report encoding on and off, the way xterm itself does: 1006 and
+    // 1016 each select theirs, switching either off returns to the default, and a full reset clears
+    // it. Returning false lets xterm apply the mode as well, so its own tracking mode stays right.
+    const entry = e
+    const follow = (on: boolean) => (params: (number | number[])[]) => {
+      for (const p of params) {
+        const n = typeof p === 'number' ? p : p[0]
+        if (n === 1006) entry.mouseEncoding = on ? 'sgr' : 'default'
+        else if (n === 1016) entry.mouseEncoding = on ? 'sgr-pixels' : 'default'
+      }
+      return false
+    }
+    e.term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, follow(true))
+    e.term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, follow(false))
+    e.term.parser.registerEscHandler({ final: 'c' }, () => {
+      entry.mouseEncoding = 'default'
+      return false
+    })
     entries.set(sessionId, e)
   }
   return e
@@ -119,6 +144,7 @@ export function feedPreview(sessionId: string, data: string, seq: number, isSnap
     // two readers of the same byte stream doing the same thing with it.
     if (seq === e.seq) return
     e.term.reset()
+    e.mouseEncoding = 'default'
     e.seq = seq
     e.term.write(data, () => {
       e.dirty = true
@@ -365,6 +391,130 @@ export function getPreviewWindow(
   const end = anchorEnd === null ? bottom : Math.max(0, Math.min(Math.floor(anchorEnd), bottom))
   const start = Math.max(0, end - want + 1)
   return { rows: spansFor(e.term, start, end), start, end, total: bottom + 1 }
+}
+
+/**
+ * Whether the program behind a card asked for the mouse, and what a card needs to send it a report.
+ *
+ * Claude Code keeps no history in its terminal: it repaints one screen in place, so the preview holds
+ * one screen and scrolling it shows nothing new. What scrolls in the dock is the CLI itself. It
+ * switches mouse reporting on, the dock's terminal sends a report for each wheel step, and the CLI
+ * moves its own view. A card does the same with this, which is why it reads the same emulator the
+ * miniature is drawn from: the modes are whatever the stream last set.
+ *
+ * `screenTop` is the buffer index of the screen's first row, so a row the card draws can be turned
+ * into the screen row a report names.
+ */
+export interface PreviewMouse {
+  tracking: 'none' | 'x10' | 'vt200' | 'drag' | 'any'
+  encoding: 'default' | 'sgr' | 'sgr-pixels'
+  cols: number
+  rows: number
+  screenTop: number
+}
+
+export function getPreviewMouse(sessionId: string): PreviewMouse | null {
+  const e = entries.get(sessionId)
+  if (!e) return null
+  return {
+    tracking: e.term.modes.mouseTrackingMode,
+    encoding: e.mouseEncoding,
+    cols: e.term.cols,
+    rows: e.term.rows,
+    screenTop: e.term.buffer.active.baseY,
+  }
+}
+
+/**
+ * A row of box-drawing rule characters, as the CLI draws the edges of its prompt box. The upper one can
+ * carry the session's name near its end ("──── Orchestrator ─"), so a label is allowed after the run.
+ */
+const RULE_ROW = /^[─━═]{12,}(\s+\S.{0,60}?\s+[─━═]+)?$/
+/** The CLI's working line: a spinner mark, a word, and an ellipsis ("✻ Fermenting…"). */
+const WORKING_ROW = /^[·✢✳✶✻✽*]\s+\S.*…/
+
+/**
+ * The rows at the bottom of a Claude card's screen that say what is happening now, and nothing above.
+ *
+ * Claude Code repaints one screen the size of the dock pane, so the conversation above its prompt is
+ * only ever as tall as the pane. A Claude card draws the conversation from the transcript instead,
+ * and takes from the screen only this: the working line above the prompt box and the status line
+ * under it. The prompt box itself is not drawn; its text is the draft, shown in the card's own input
+ * line (canon 02 revision 14). Without a prompt box (a permission question,
+ * a picker) it is the bottom of the screen, so a card waiting on the owner still shows the question.
+ * Canon 02 revision 13.
+ */
+export interface PreviewLive {
+  /** The rows to draw under the conversation: working line above the prompt box, status below it. */
+  rows: Span[][]
+  /**
+   * What sits in the CLI's prompt, typed and not yet sent, or null when there is no prompt box on
+   * screen. Empty string for an empty prompt. The card shows it in its own input line.
+   */
+  draft: string | null
+}
+
+export function getPreviewLive(sessionId: string, fallbackRows = 8): PreviewLive {
+  const e = entries.get(sessionId)
+  if (!e) return { rows: [], draft: null }
+  const buf = e.term.buffer.active
+  const top = buf.baseY
+  const text: string[] = []
+  for (let y = top; y < top + e.term.rows; y++) text.push(buf.getLine(y)?.translateToString(true).trim() ?? '')
+  let last = text.length - 1
+  while (last >= 0 && text[last] === '') last--
+  if (last < 0) return { rows: [], draft: null }
+
+  const rules: number[] = []
+  for (let i = 0; i <= last; i++) if (RULE_ROW.test(text[i]!)) rules.push(i)
+  // The prompt box: the lowest pair of rules with the `>` line between them.
+  let lo = -1
+  let hi = -1
+  for (let k = rules.length - 1; k > 0 && lo < 0; k--) {
+    for (let i = rules[k - 1]! + 1; i < rules[k]!; i++) {
+      if (/^[>❯]/.test(text[i]!)) {
+        lo = rules[k - 1]!
+        hi = rules[k]!
+      }
+    }
+  }
+  if (lo < 0) return { rows: spansFor(e.term, top + Math.max(0, last - fallbackRows + 1), top + last), draft: null }
+
+  // The working line and anything hanging under it ("⎿ Tip: ...", its to-do list), a few rows up.
+  let from = lo
+  for (let i = lo - 1; i >= Math.max(0, lo - 10); i--) {
+    const t = text[i]!
+    if (WORKING_ROW.test(t)) {
+      from = i
+      break
+    }
+    if (t !== '' && !/^[⎿☐☒■□✔]/.test(t)) break
+  }
+
+  /*
+   * The draft, from the cells rather than the text, so the CLI's dim suggestion in an empty prompt
+   * ('Try "..."') is not taken for something the owner typed.
+   */
+  const parts: string[] = []
+  for (let y = lo + 1; y < hi; y++) {
+    const line = buf.getLine(top + y)
+    if (!line) continue
+    let row = ''
+    for (let x = 0; x < line.length; x++) {
+      const cell = line.getCell(x)
+      if (!cell) continue
+      row += cell.isDim() ? ' ' : cell.getChars() || ' '
+    }
+    parts.push(row.trim())
+  }
+  const draft = parts.join(' ').replace(/^[>❯]\s?/, '').replace(/\s+/g, ' ').trim()
+
+  // Blank rows between them are spacing the CLI wants on a full screen; on a card they cost a line of
+  // conversation each.
+  const keep = (rows: Span[][]) => rows.filter((row) => row.some((s) => s.text.trim() !== '' || s.bg))
+  const above = from < lo ? keep(spansFor(e.term, top + from, top + lo - 1)) : []
+  const below = hi < last ? keep(spansFor(e.term, top + hi + 1, top + last)) : []
+  return { rows: [...above, ...below], draft }
 }
 
 /** Hear about one session's preview, and only that one. */

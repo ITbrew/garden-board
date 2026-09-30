@@ -31,6 +31,8 @@
  * It is read only. There is no argument that changes anything.
  */
 import { WebSocket } from 'ws'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const PORT = Number(process.env.GARDEN_PORT) || 5178
 const ME = process.env.GARDEN_SESSION_ID || null
@@ -211,7 +213,10 @@ ws.on('message', (raw) => {
     out.push(`${dead.length} FAILED. Sending to one WAKES IT, and it reads its inbox as it comes up:`)
     for (const d of dead) {
       out.push(`  ${d.title}`)
-      out.push(`    node "C:/Garden/server/bin/garden-hire.mjs" --start ${d.id}`)
+      // This file's own directory, not a drive letter from whichever machine it was written on.
+      // It said `C:/Garden`, which does not exist on this checkout, so the one command this tool
+      // hands the reader was a command that fails.
+      out.push(`    node "${resolve(fileURLToPath(import.meta.url), '..', 'garden-hire.mjs').replace(/\\/g, '/')}" --start ${d.id}`)
     }
     out.push('  Reviving costs tokens: each card reads its inbox as it comes up.')
   }

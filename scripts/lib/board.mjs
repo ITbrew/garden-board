@@ -26,7 +26,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /**
  * Start one and seed it.
  *
- * `cards` is a list of titles, or of `{ title, roleClass, reportsTo }` where `reportsTo` is the
+ * `cards` is a list of titles, or of `{ title, roleClass, reportsTo, adapterId }` where `reportsTo` is the
  * INDEX of an earlier card in the same list, so a test can describe a chain without knowing the ids
  * that do not exist yet. Cards are created switched off: a browser test is about what is drawn, and
  * spawning real shells to look at a layout is a cost with nothing to show for it.
@@ -76,7 +76,9 @@ export async function openBoard({ cards = [], files = {}, projectName = 'scratch
       JSON.stringify({
         t: 'session.create',
         projectId: project.id,
-        adapterId: 'shell',
+        // A shell unless the test says otherwise. A Claude card is created switched off, like every
+        // card here, so naming the adapter costs nothing and starts no CLI.
+        adapterId: spec.adapterId ?? 'shell',
         title: spec.title,
         roleClass: spec.roleClass ?? null,
         reportsTo: parent,

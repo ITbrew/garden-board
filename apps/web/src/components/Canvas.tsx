@@ -40,7 +40,7 @@ import { PipelineNode, type PipelineNodeData } from './PipelineNode'
 import { TodoBar, type TodoBarData } from './TodoBar'
 import { loopPromptFor, parseTodo, progressOf, setDone, type TodoItem } from '../todo'
 import { RefusalPill, type RefusalPillData } from './RefusalPill'
-import { onTasks, refusalsForCard } from '../tasks'
+import { onTasks, refusalsForCard, unreadFor } from '../tasks'
 import { NewCardForm, type NewCardRequest } from './NewCardForm'
 import { NewDocForm, type NewDocRequest } from './NewDocForm'
 import { COLLAPSED_H, packCards, shouldAutoPack } from '../layout'
@@ -103,10 +103,12 @@ function handlesFor(
 /**
  * The board's grid pitch, in canvas units.
  *
- * One number doing two jobs: the dots are drawn at it and cards snap to it. It was 22 as a purely
- * visual choice and stays 22, so nothing already placed jumps when this ships.
+ * One number doing two jobs: the dots are drawn at it and cards snap to it. It was 22, which next to
+ * cards hundreds of pixels across was barely a snap at all: "increase size of the snap grid, they
+ * are basically pixels compared to the card sizes". Canon 02 revision 17. Snapping applies only while
+ * a card is dragged, so nothing already placed moves until he moves it.
  */
-const GRID = 22
+const GRID = 44
 
 const nodeTypes = {
   session: SessionNode,
@@ -379,6 +381,12 @@ function CanvasInner() {
                * the arrow is marked while the block is shut.
                */
               refusalCount: refusalsByCard.get(c.item.id)?.length ?? 0,
+              /*
+               * Mail nobody has told this card about. Same argument as the refusal count above: the
+               * board may hide the detail, it may never hide the fact, and this fact had nowhere to
+               * appear at all until now.
+               */
+              unreadMail: unreadFor(c.item.id),
             } satisfies SessionNodeData,
           }
         }
@@ -1662,10 +1670,12 @@ function CanvasInner() {
           label: focused.includes(session.id) ? 'Hide terminal' : 'Open terminal',
           onSelect: () => actions.toggleFocus(session.id),
         })
-        items.push({
-          label: off ? 'Turn on' : 'Turn off',
-          onSelect: () => (off ? actions.startSession(session.id) : actions.stopSession(session.id)),
-        })
+        /*
+         * Turn on sits at the top, where it is handy and harmless. Turn off is at the bottom beside
+         * Close: next to Open terminal, one slip of the pointer ended .5Orche2 mid-turn on 24
+         * September, with five subagents running.
+         */
+        if (off) items.push({ label: 'Turn on', onSelect: () => actions.startSession(session.id) })
         items.push({
           label: 'Duplicate',
           onSelect: () => actions.newSession(session.projectId, session.adapterId),
@@ -1744,6 +1754,14 @@ function CanvasInner() {
       })
 
       items.push({ separator: true })
+      if (session && !off) {
+        items.push({
+          label: 'Turn off',
+          danger: true,
+          hint: 'ends its CLI mid-turn; Turn on resumes the conversation',
+          onSelect: () => actions.stopSession(session.id),
+        })
+      }
       items.push({
         label: kind === 'doc' ? 'Remove from the board' : 'Close',
         danger: kind === 'doc',

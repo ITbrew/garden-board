@@ -112,12 +112,27 @@ if (startId) {
 async function createFlow() {
   const title = arg('title')
   const role = arg('role')
+  const adapterId = arg('adapter') ?? 'claude'
   if (!title) fail('What is it called? Pass --title. It is how other cards address it.')
-  if (!role) {
+  /*
+   * A role IS a deny list, and a deny list belongs to the CLI that reads it. The Claude CLI reads
+   * its permissions once at launch, so a Claude card must be told which set it launches with and
+   * there is no sensible default. Codex does not read that list at all: `codexAdapter.launch` never
+   * consults the role, so a role passed to one is a label with nothing behind it, and the honest
+   * thing is to record that the card has none.
+   *
+   * `roleClass` is declared `RoleClass | null` and `roots.ts` handles null everywhere it matters
+   * (`ROLE_SKILLS[...] ?? DEFAULT_SKILLS`, a null role file, the reading index), so a card with no
+   * role has always been a supported state on the board. Only this shim refused to create one, which
+   * is why PC1's three Codex cards could not be imported onto PC2: their `roleClass` is null, and
+   * the only ways through were to invent a role nobody chose or to leave the cards off the board.
+   */
+  if (!role && adapterId === 'claude') {
     fail(
       'Pass --role. It decides what the card may reach for, and it cannot be\n' +
         'changed without restarting the card, because the CLI reads its\n' +
-        'permissions once at launch.',
+        'permissions once at launch.\n' +
+        'Only a --adapter claude card needs one; a Codex card has no such list.',
     )
   }
 
@@ -248,9 +263,9 @@ async function createFlow() {
     from: process.env.GARDEN_SESSION_ID,
     action: 'create',
     title,
-    role,
+    role: role ?? null,
     reportsTo: arg('reports-to') ?? null,
-    adapterId: arg('adapter') ?? 'claude',
+    adapterId,
     model: arg('model') ?? null,
     effort: arg('effort') ?? null,
     teamSize: teamSize === undefined ? null : Number(teamSize),

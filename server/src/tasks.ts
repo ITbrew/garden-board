@@ -71,7 +71,7 @@ export interface Hop {
  * message really moved. A hand-off somebody made by writing into a mailbox directly has no task id
  * and therefore no hop, which is why the ledger can have gaps and says so rather than closing them.
  *
- * Every delivery, through `listMailDelivered`, and never a page of events. This used to walk
+ * Every delivery, through `mailDeliveredForTask`, and never a page of events. This used to walk
  * `listEvents`, which is capped, and a card's deliveries are a small fraction of what it records: on
  * a working card the review hop falls out of the page while the task is still open, the spiral guard
  * counts zero rounds on a task that has been round one, and a remediation the owner's rule sends
@@ -79,21 +79,26 @@ export interface Hop {
  * with its work.
  */
 export function hopsForTask(store: Store, projectId: string, taskId: string): Hop[] {
+  /*
+   * One query for this task's deliveries, rather than every delivery of every card decoded in
+   * JavaScript. That walk ran on every POST /mail: on 24 September, with 2,770 deliveries on the
+   * board and the processor at a fifth of its speed, it was 3.6 to 8.8 s standing alone, and a few
+   * mails in a row were the Keeper's 2 s freezes. The indexed query answers in 1 to 2 ms.
+   */
+  const titles = new Map(store.listSessions().filter((s) => s.projectId === projectId).map((s) => [s.id, s.title]))
   const hops: Hop[] = []
-  for (const session of store.listSessions().filter((s) => s.projectId === projectId)) {
-    for (const e of store.listMailDelivered(session.id)) {
-      const p = e.payload as any
-      if (!p || p.taskId !== taskId) continue
-      hops.push({
-        ts: e.ts,
-        fromId: p.from,
-        fromTitle: p.fromTitle ?? 'a card',
-        toId: session.id,
-        toTitle: session.title,
-        kind: (p.kind ?? 'work') as MailKind,
-        text: String(p.text ?? ''),
-      })
-    }
+  for (const e of store.mailDeliveredForTask(projectId, taskId)) {
+    const p = e.payload as any
+    if (!p || p.taskId !== taskId) continue
+    hops.push({
+      ts: e.ts,
+      fromId: p.from,
+      fromTitle: p.fromTitle ?? 'a card',
+      toId: e.sessionId,
+      toTitle: titles.get(e.sessionId) ?? 'a card',
+      kind: (p.kind ?? 'work') as MailKind,
+      text: String(p.text ?? ''),
+    })
   }
   return hops.sort((a, b) => a.ts - b.ts)
 }

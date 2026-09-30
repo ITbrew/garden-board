@@ -41,6 +41,8 @@ export interface Project {
   /** Kept for the Claude slot so older rows keep working. Prefer `profiles`. */
   defaultProfileId: string | null
   notes: string
+  /** Where its tab sits in the row, once tabs have been ordered. Canon 02 revision 17. */
+  tabOrder?: number | null
   createdAt: number
   lastOpenedAt: number
 }
@@ -841,6 +843,63 @@ export interface TaskCreateInput {
 // ---------------------------------------------------------------------------
 
 /** Renderer to server. Every field is validated server-side before anything is spawned. */
+/**
+ * Something the watchdog noticed. docs/canonical/27-the-overseer.md.
+ *
+ * One live row per kind and subject. `subject` is a card id, a project id, or 'machine' / 'server'.
+ * `act` wakes the Keeper; `warn` is shown; `info` records a repair the watchdog made itself.
+ */
+/** The Keeper as the board shows it: hired or not, its process up or not, paused by the owner or not. */
+export interface KeeperState {
+  present: boolean
+  running: boolean
+  paused: boolean
+}
+
+/** What the overseer card shows. docs/canonical/27-the-overseer.md, "The overseer card". */
+export interface OverseerView {
+  keeper: KeeperState
+  machine: {
+    cpuPct: number
+    freeMemGB: number
+    cores: number
+    scannedSecondsAgo: number | null
+    top: { name: string; pct: number; cards: string[] }[]
+  }
+  rhythm: {
+    lastPatrolAt: number | null
+    lastGlanceAt: number | null
+    lastWokenAt: number | null
+    nextPatrolAt: number
+    nextGlanceAt: number
+    patrolMinutes: number
+    glanceMinutes: number
+  }
+  /** Findings waiting to be sent to the Keeper in its next batch. */
+  queued: number
+  /** Findings with a note on them, newest first: what the Keeper or the watchdog did. */
+  lately: Finding[]
+}
+
+export interface Finding {
+  id: string
+  kind: string
+  subject: string
+  projectId: string | null
+  severity: 'info' | 'warn' | 'act'
+  title: string
+  detail: string | null
+  evidence: unknown
+  state: 'open' | 'handled' | 'escalated' | 'resolved' | 'dismissed'
+  firstSeen: number
+  lastSeen: number
+  /** Separate occurrences while it stayed live, not ticks. */
+  count: number
+  /** What was done about it, and by whom. */
+  note: string | null
+  resolvedAt: number | null
+}
+
 export type ClientMessage =
   /**
    * Who is on the other end of this socket, said once at the start.
@@ -868,6 +927,8 @@ export type ClientMessage =
   | { t: 'project.add'; path: string; name?: string }
   /** Opens the OS folder dialog on the server, then adds whatever was chosen. */
   | { t: 'project.pick' }
+  /** The open tabs in the order he dragged them into, every open project's id once. Canon 02 revision 17. */
+  | { t: 'project.reorder'; ids: string[] }
   | { t: 'project.remove'; projectId: string }
   | { t: 'project.open'; projectId: string }
   | { t: 'project.setProfile'; projectId: string; adapterId: AdapterId; profileId: string | null }
@@ -937,6 +998,17 @@ export type ClientMessage =
       y?: number
     }
   | { t: 'session.input'; sessionId: string; data: string }
+  /**
+   * An image pasted with Ctrl+V, base64 without a data: prefix. The server saves it under
+   * `~/.garden/pastes` and answers `paste.saved` with the path, which the page types where he pasted.
+   */
+  | { t: 'paste.image'; reqId: string; mime: string; data: string }
+  /** A whole line from a card's input line: the server holds it until the CLI is loaded, types it, and confirms the submit. */
+  | { t: 'session.line'; sessionId: string; text: string }
+  /** The owner putting a finding down from the Health section. */
+  | { t: 'finding.dismiss'; id: string }
+  /** The owner's pause switch for the Keeper, from the Health section. */
+  | { t: 'keeper.pause'; paused: boolean }
   | { t: 'session.resize'; sessionId: string; cols: number; rows: number }
   /** Turn off: ends the process, keeps the card and its history on the board. */
   | { t: 'session.stop'; sessionId: string }
@@ -958,7 +1030,16 @@ export type ClientMessage =
    * Its transcript is on disk the whole time though, so the card reads that rather than showing
    * three lines of facts about a run nobody can see into.
    */
-  | { t: 'agent.chat'; sessionId: string }
+  | {
+      t: 'agent.chat'
+      sessionId: string
+      /**
+       * The page wanted: the turns whose lines END before this byte offset. Absent for the newest
+       * page. Always an offset the server itself handed back as a page's `cursor`, so it is always
+       * the start of a line and a page never begins inside a record.
+       */
+      before?: number
+    }
   /**
    * Send a line to a spawned agent, through the terminal of the card that hired it.
    *
@@ -1347,6 +1428,8 @@ export type ClientMessage =
 
 /** Server to renderer. */
 export type ServerMessage =
+  /** Where a pasted image was saved, or why it was not. Answers `paste.image` by its `reqId`. */
+  | { t: 'paste.saved'; reqId: string; path: string | null; error?: string }
   /** The answer to a `pulse`. Carries nothing: arriving at all is the entire message. */
   | { t: 'pulse' }
   | {
@@ -1385,7 +1468,30 @@ export type ServerMessage =
        * list that empties itself on refresh is not that. Newest first, capped.
        */
       refusals: AgentEvent[]
+      /**
+       * How many messages each card has not been told about, keyed by card id.
+       *
+       * On the face of a card rather than in a panel, because the thing that went wrong for weeks
+       * was invisible: mail was filed, nothing woke the card, and the board looked identical either
+       * way. A number the owner can see is what turns "my mail vanishes" into "that card has six
+       * waiting".
+       *
+       * Cards with nothing waiting are left out rather than sent as zero.
+       */
+      unreadMail: Record<string, number>
+      /** The watchdog's live findings, so the Health section is right on first paint. */
+      findings: Finding[]
+      /** Whether a Keeper card exists, is running, and whether the owner has paused it. */
+      keeper: KeeperState
+      /** The overseer card's whole picture, so it draws at once rather than ten seconds later. */
+      overseer: OverseerView
     }
+  /** One card's unread count changed. Sent on every file and every catch-up. */
+  | { t: 'mail.unread'; sessionId: string; count: number }
+  /** The whole live list, sent whenever any finding opens, moves or closes. */
+  | { t: 'findings'; findings: Finding[] }
+  | ({ t: 'keeper' } & KeeperState)
+  | { t: 'overseer'; view: OverseerView }
   | { t: 'wire.added'; wire: Wire }
   | { t: 'wire.updated'; wire: Wire }
   | { t: 'wire.removed'; wireId: string }
@@ -1424,6 +1530,8 @@ export type ServerMessage =
   | { t: 'project.added'; project: Project }
   | { t: 'project.updated'; project: Project }
   | { t: 'project.picked'; path: string | null }
+  /** The open tabs' order as the server now keeps it. */
+  | { t: 'projects.ordered'; ids: string[] }
   | { t: 'profiles'; profiles: Profile[]; defaultAccount: AccountIdentity | null }
   | { t: 'project.removed'; projectId: string }
   | { t: 'session.added'; session: TerminalSession }
@@ -1475,8 +1583,26 @@ export type ServerMessage =
   | {
       t: 'agent.chat'
       sessionId: string
-      /** `full` is present only on a turn whose `text` is a shortened version of it. */
-      turns: Array<{ role: 'asked' | 'said' | 'did'; text: string; at: number | null; full?: string }>
+      /**
+       * `full` is present only on a turn whose `text` is a shortened version of it.
+       *
+       * `off` is the byte offset of the transcript line the turn came from, and it is what lets a
+       * card hold older pages and the live tail together: a newest page replaces only turns at or
+       * after its own `cursor`, so a card scrolled back through an hour of work does not snap back
+       * to the last page the moment something new is said. Absent from a server older than paging.
+       */
+      turns: Array<{ role: 'asked' | 'said' | 'did'; text: string; at: number | null; full?: string; off?: number }>
+      /** Byte offset of the first line this page read. The next page up asks for turns `before` it. */
+      cursor?: number
+      /** True when this page reached the first line of the file, so there is nothing earlier. */
+      atStart?: boolean
+      /** True when this answers a request for an OLDER page, rather than being the newest turns. */
+      older?: boolean
+      /**
+       * Which transcript these offsets belong to. A card that resumes into a new conversation gets a
+       * new file, and offsets from the old one mean nothing in it, so a change here starts over.
+       */
+      file?: string
     }
   /** What happened to a line sent to a spawned agent. `reason` is present only when it did not go. */
   | { t: 'agent.said'; sessionId: string; ok: boolean; reason?: string }
@@ -1583,11 +1709,11 @@ export type ServerMessage =
  * role/function. so you technically dont need blender-prop-review because its outside of your
  * scope."
  *
- * The per-role differences are not tidiness either. Canon already claims a worker cannot run a
- * blind pass and a manager may not write canon, and both were true only because a related tool
- * happened to be denied. Taking `double-blind-review` off a worker and `canon-library` off a
- * manager makes those claims enforced rather than asked for, which is the distinction the whole
- * library is built on.
+ * The per-role differences are not tidiness either. Canon claims a manager may not write canon,
+ * and that was true only because a related tool happened to be denied. Taking `canon-library` off a
+ * manager makes the claim enforced rather than asked for, which is the distinction the whole library
+ * is built on. (`double-blind-review` was withheld from workers on the same reasoning until
+ * 2026-09-29, when reviewing one's own screenshots became every card's job.)
  */
 export const ROLE_SKILLS: Record<string, string[]> = {
   // `hiring-a-card` is the orchestrator's alone because it is the only role with `creates`. Handing
@@ -1605,11 +1731,12 @@ export const ROLE_SKILLS: Record<string, string[]> = {
   manager: ['card-roots', 'double-blind-review', 'exit-interview', 'session-claims'],
   boss: ['card-roots', 'double-blind-review', 'exit-interview', 'session-claims'],
   delegator: ['card-roots', 'double-blind-review', 'exit-interview', 'session-claims'],
-  // No `card-roots`, because a worker hires nobody, and no `double-blind-review`, because the role
-  // is denied `Agent` and cannot spawn a reviewer at all. It would have been a brief describing
-  // something the card would discover it could not do only at the moment of refusal.
-  worker: ['exit-interview', 'session-claims'],
-  specialist: ['exit-interview', 'session-claims'],
+  // No `card-roots`, because a worker hires nobody. `double-blind-review` since 2026-09-29: the
+  // owner, "give permission back to cardes to review their own screenshots/images". Its first half,
+  // the author looking at its own shots, is exactly a worker's job; its optional second half says a
+  // card denied `Agent` hands the before-and-after pair to its manager. Canon 14 revision 10.
+  worker: ['double-blind-review', 'exit-interview', 'session-claims'],
+  specialist: ['double-blind-review', 'exit-interview', 'session-claims'],
   reviewer: ['exit-interview'],
   // The same list as a reviewer's, for the same reason: it checks work and hands none out, so
   // `card-roots` and `double-blind-review` describe nothing it can do. Named rather than left to
@@ -1619,7 +1746,7 @@ export const ROLE_SKILLS: Record<string, string[]> = {
 }
 
 /** What a card with no role keeps: the project-agnostic ones, and nothing belonging to another repo. */
-export const DEFAULT_SKILLS: string[] = ['exit-interview', 'session-claims']
+export const DEFAULT_SKILLS: string[] = ['double-blind-review', 'exit-interview', 'session-claims']
 
 export const ROLE_POWERS: Record<
   string,
@@ -1703,7 +1830,7 @@ export const ROLE_POWERS: Record<
     denies: ['Agent', 'SendMessage', 'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList'],
     hires: false,
     creates: false,
-    summary: 'you do the work itself, and you are the only role that changes the repository',
+    summary: 'you do the work yourself, with no subagents and nobody below you',
     enforced: 'Enforced: you cannot hire anyone, so the work is yours to do.',
   },
   reviewer: {

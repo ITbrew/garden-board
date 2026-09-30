@@ -26,7 +26,8 @@
  */
 import { spawn } from 'node:child_process'
 import { createWriteStream, mkdirSync, existsSync, writeFileSync, statSync, renameSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { get } from 'node:http'
 
@@ -38,7 +39,14 @@ const valueOf = (f) => {
 }
 
 const PORT = Number(valueOf('--port') ?? 5178)
-const GARDEN = valueOf('--cwd') ?? 'C:/Garden'
+/*
+ * The repo this file lives in, from its own location: <root>/server/bin/garden-supervise.mjs.
+ *
+ * This defaulted to the literal `C:/Garden`, so on a checkout anywhere else the supervisor would
+ * restart the server in a directory that does not exist, or worse, in somebody's other clone. Two
+ * other tools carried the same literal and both failed by blaming something other than the path.
+ */
+const GARDEN = valueOf('--cwd') ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const ONCE = has('--once')
 const DRY = valueOf('--dry-run')
 

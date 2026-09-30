@@ -16,7 +16,26 @@ export function ProjectTabs() {
   const activeProjectId = useApp((s) => s.activeProjectId)
   const closed = useApp((s) => s.closedProjects)
   const boards = useApp((s) => s.boards)
+  /** A folder dialog is already open somewhere. Opening a second hides the first behind the app. */
+  const pickInFlight = useApp((s) => s.pickInFlight)
   const [menu, setMenu] = useState<MenuState | null>(null)
+  /**
+   * The tab being dragged, and where it would land: before the tab under the pointer, or after it
+   * when the pointer is past that tab's middle. Canon 02 revision 17.
+   */
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null)
+
+  const drop = () => {
+    if (dragId && dropAt && dragId !== dropAt.id) {
+      const ids = projects.map((p) => p.id).filter((id) => id !== dragId)
+      const i = ids.indexOf(dropAt.id)
+      ids.splice(dropAt.after ? i + 1 : i, 0, dragId)
+      actions.reorderProjects(ids)
+    }
+    setDragId(null)
+    setDropAt(null)
+  }
   /** The tab waiting on a second press before it is closed. */
   const [confirm, setConfirm] = useState<{
     projectId: string
@@ -137,7 +156,31 @@ export function ProjectTabs() {
         return (
           <button
             key={p.id}
-            className={`tab ${active ? 'is-active' : ''}`}
+            className={`tab ${active ? 'is-active' : ''}${dragId === p.id ? ' is-dragging' : ''}${
+              dropAt?.id === p.id && dragId !== p.id ? (dropAt.after ? ' drop-after' : ' drop-before') : ''
+            }`}
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.effectAllowed = 'move'
+              e.dataTransfer.setData('text/plain', p.name)
+              setDragId(p.id)
+            }}
+            onDragOver={(e) => {
+              if (!dragId) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+              const r = e.currentTarget.getBoundingClientRect()
+              const after = e.clientX > r.left + r.width / 2
+              if (dropAt?.id !== p.id || dropAt.after !== after) setDropAt({ id: p.id, after })
+            }}
+            onDrop={(e) => {
+              e.preventDefault()
+              drop()
+            }}
+            onDragEnd={() => {
+              setDragId(null)
+              setDropAt(null)
+            }}
             onClick={() => actions.setActiveProject(p.id)}
             onContextMenu={(e) => tabMenu(e, p.id, p.name, count)}
             title={p.path}
@@ -165,30 +208,35 @@ export function ProjectTabs() {
       })}
 
       {/*
-       * Opening a tab is three different things, so it asks which.
+       * Click opens the folder picker; the folder chosen opens as a new tab. The owner: "i press +
+       * it opens a file explorer where i can select a folder and then a garden tab opens for that
+       * project". This used to open a menu with a typed-path entry as well, which existed only
+       * because the old dialog kept opening behind the browser; he asked for it to go, and the
+       * picker now opens in front (scripts/test-the-folder-picker-opens-in-front.mjs). Canon 02
+       * revision 11.
        *
-       * A folder is the way a new project starts. The other two are the ones the owner asked for:
-       * a board he saved from inside Garden, and a tab he closed earlier whose layout is still
-       * sitting there intact. Hiding those behind a folder dialog would mean the only way back to
-       * a flow he built was to remember which directory it belonged to.
+       * Right-click keeps the other two ways to open a tab, a saved board and a tab he closed, for
+       * when there is no tab to right-click. Disabled while a picker is open, because a second one
+       * would stack on the first.
        */}
       <button
         className="tab tab--add"
-        title="Open a project, a saved board, or a tab you closed"
-        onClick={(e) => {
-          const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+        title={
+          pickInFlight
+            ? 'A folder picker is already open'
+            : 'Open a project folder. Right-click for saved boards and tabs you closed'
+        }
+        disabled={pickInFlight}
+        onClick={() => actions.pickProject()}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          if (!boards.length && !closed.length) return
           setMenu({
-            x: r.left,
-            y: r.bottom + 4,
+            x: e.clientX,
+            y: e.clientY,
             items: [
-              {
-                label: 'Open a project folder',
-                hint: 'the Windows folder dialog',
-                onSelect: () => actions.pickProject(),
-              },
               ...(boards.length
                 ? [
-                    { separator: true as const },
                     {
                       label: 'Saved boards',
                       hint: `${boards.length} saved in the Garden directory`,

@@ -17,7 +17,9 @@ rediscovering it: the file, the line, what happens, and what you expected instea
 
 <If this card exists for blind review, say so here and state the blindness plainly: it sees the
 artefact and the questions, never the code, the diff or the conversation that produced them. A
-reviewer that knows what the change was meant to do will confirm that it does it.>
+reviewer that knows what the change was meant to do will confirm that it does it. For screenshots,
+the usual shape is a before and an after of the same screen, labelled A and B in random order, and
+the question is which it would choose for tasks named in a user's words (canon 14 revision 10).>
 
 ## The questions
 

@@ -1,4 +1,5 @@
 import { Terminal as Xterm } from '@xterm/xterm'
+import { pastedImage, saveImage, typedPath } from './paste-image'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { actions, onSessionBytes } from './state'
@@ -73,8 +74,34 @@ function create(sessionId: string): PooledTerminal {
    */
   term.attachCustomKeyEventHandler((e) => {
     if (e.type === 'keydown' && e.key === 'Tab') e.preventDefault()
+    /*
+     * Ctrl+V is the browser's paste, not a control character. xterm turned it into ^V for the
+     * process, so the browser never pasted: right-click Paste worked and Ctrl+V did nothing, a
+     * screenshot included ("right click and paste works but not cntrl v?"). Returning false leaves
+     * the key to the browser, whose paste reaches xterm for text and the handler below for images.
+     */
+    if (e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'v') return false
     return true
   })
+
+  /*
+   * A screenshot on the clipboard pastes its saved path, typed into the process as a paste of text
+   * would be. Caught before xterm sees the event; xterm would otherwise find no text and do nothing.
+   * Canon 03, "Pasting a screenshot".
+   */
+  host.addEventListener(
+    'paste',
+    (e) => {
+      const file = pastedImage(e)
+      if (!file) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      void saveImage(file).then((path) => {
+        if (path) actions.input(sessionId, typedPath(path))
+      })
+    },
+    true,
+  )
 
   /**
    * How much of the byte stream this terminal has already drawn.
@@ -86,6 +113,17 @@ function create(sessionId: string): PooledTerminal {
    */
   let writtenSeq = -1
   const pending: Array<{ data: string; seq: number }> = []
+  /**
+   * Snapshot replays still being parsed. While any is, xterm's replies are dropped.
+   *
+   * xterm answers some of what it parses (colour queries, cursor-position requests) by emitting
+   * bytes as input, and a snapshot holds every question the program asked since it started. Replayed,
+   * they were all answered again and the answers went to the live process as keystrokes: Codex asks
+   * for both colours at startup, so every Codex pane opened afterwards put
+   * `]10;rgb:d5d5/dada/e6e6\]11;rgb:0b0b/0d0d/1212\` in its input box ahead of what the owner typed.
+   * Canon 03 revision 13.
+   */
+  let replaying = 0
 
   const offBytes = onSessionBytes(sessionId, (data, seq, isSnapshot, cols, rows) => {
     // Recency should mean "this session is doing something", not "this pane was opened recently".
@@ -123,7 +161,9 @@ function create(sessionId: string): PooledTerminal {
       const restore = cols && rows && (term.cols !== cols || term.rows !== rows)
       if (restore) term.resize(cols, rows)
 
+      replaying++
       term.write(data, () => {
+        replaying--
         if (restore) {
           try {
             fit.fit()
@@ -151,7 +191,10 @@ function create(sessionId: string): PooledTerminal {
     term.write(data)
   })
 
-  const offInput = term.onData((d) => actions.input(sessionId, d))
+  const offInput = term.onData((d) => {
+    if (replaying > 0) return
+    actions.input(sessionId, d)
+  })
   actions.requestScrollback(sessionId)
 
   const entry: PooledTerminal = {

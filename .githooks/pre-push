@@ -39,6 +39,22 @@ step() {
 }
 
 echo "pre-push:"
+
+# Two PCs push to one branch. Git refuses a non-fast-forward push on its own, but only after the
+# checks below have run and with a message about "fetch first" that says nothing about the other
+# PC. So: fetch now, and if the remote branch has commits this checkout does not, stop here and
+# say what to do. This is the "pull before push" rule as a refusal rather than a memory.
+printf '  %-28s' "on top of origin"
+remote=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || echo origin/master)
+if git fetch --quiet origin 2>/dev/null && ! git merge-base --is-ancestor "$remote" HEAD 2>/dev/null; then
+  echo "FAILED"
+  echo "    $remote has commits this checkout does not (the other PC pushed)."
+  echo "    Run: git pull --rebase origin ${remote#origin/}   then push again."
+  echo "    Only unpushed commits get rebased; if git asks for a force push, stop and ask."
+  fail=1
+else
+  echo "ok"
+fi
 step "typecheck" npm run --silent typecheck
 step "no test touches the board" node scripts/check-no-live-board.mjs
 step "no credential in the tree" node scripts/check-no-secrets.mjs --all

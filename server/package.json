@@ -1,6 +1,6 @@
 {
   "name": "@garden/server",
-  "version": "1.1.18",
+  "version": "1.1.79",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,8 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
     "better-sqlite3": "^11.7.0",
     "node-pty": "^1.1.0",
     "ws": "^8.18.0"

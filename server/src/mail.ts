@@ -11,13 +11,14 @@
  * because its instructions say to, which keeps the CLI in charge of its own context and means a
  * wire can never silently change what an agent was asked to do.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { TerminalSession } from '@garden/shared'
 import { DATA_DIR } from './store.js'
 import { ROLE_POWERS } from './hooks-install.js'
 import { MAIL_KINDS } from './tasks.js'
+import { noReportingLine } from './memory.js'
 
 export function mailDirFor(sessionId: string): string {
   const dir = join(DATA_DIR, 'mail', sessionId)
@@ -176,11 +177,22 @@ export function writePeers(session: TerminalSession, peers: Peer[]): void {
     '',
     '## Sending to one of them',
     '',
-    'Write what you want to say to a file, with your file writing tool rather than with a shell',
-    'command, and then run this:',
+    'For anything longer than one short paragraph, or anything with a quote in it, write what you want',
+    'to say to a file, with your file writing tool rather than with a shell command, and then run this:',
     '',
     '```',
     `node "${forward(sendShimPath())}" --to "<their title>" --kind <kind> --task <task id> --file "${forward(outbox)}/<task id>.md"`,
+    '```',
+    '',
+    /*
+     * The short form, so a short reply is one step rather than two (canon 06 revision 10). Single
+     * quotes in the Bash tool keep everything but an apostrophe literal, so the rule is: none inside.
+     */
+    'A short message (one paragraph, under about 500 characters, no apostrophe or double quote in it:',
+    'write "do not", not "don\'t") goes in one step, in the Bash tool, in single quotes:',
+    '',
+    '```',
+    `node "${forward(sendShimPath())}" --to "<their title>" --kind <kind> --task <task id> --text '<your message>'`,
     '```',
     '',
     /*
@@ -202,17 +214,14 @@ export function writePeers(session: TerminalSession, peers: Peer[]): void {
      * A path is the same length whatever is in the file, so this shape has no size at which it
      * starts failing. That is the whole reason it is the one shown.
      */
-    'Never put the message inside the command itself, with an `echo` or a heredoc. A quote in the',
-    'command is reopened by the shell and the rest of your message is lost, and a command carrying a',
-    'few thousand characters cannot be security scanned, so it stops and waits for the owner to',
+    'Never put a long message inside the command, with `--text`, an `echo` or a heredoc. A quote in',
+    'the command is reopened by the shell and the rest of your message is lost, and a command carrying',
+    'a few thousand characters cannot be security scanned, so it stops and waits for the owner to',
     'approve it by hand while you wait with it. A file has neither problem, and the command is the',
     'same length whether you are sending one line or four thousand words.',
     '',
     `Your outbox is \`${forward(outbox)}\` and already exists. Name the file after the task, so what`,
     'you actually sent is still there afterwards if anyone asks.',
-    '',
-    '`--text "..."` is still fine for one short line with no quotes in it. Anything longer goes in a',
-    'file.',
     '',
     'Garden replies with what it did, or with the reason it refused, and a refusal is worth reading:',
     'it names the wire that is missing or the step that has not happened yet. It also says what became',
@@ -270,12 +279,20 @@ export function postMessage(
   fromTitle: string,
   text: string,
   meta?: { kind?: string; taskId?: string | null; fromId?: string },
-): string {
+): { file: string; offset: number } {
   const dir = mailDirFor(to.id)
   const file = join(dir, 'INBOX.md')
   if (!existsSync(file)) {
     writeFileSync(file, `# Inbox for "${to.title}"\n\nMessages sent along wires on the Garden board.\n`, 'utf8')
   }
+  /*
+   * How big the file was before this entry, captured before the append rather than derived after.
+   *
+   * It is the read marker. A card that has been told about everything up to here and no further can
+   * be handed exactly the bytes from this point to the end, which is what replaced handing it the
+   * last 400 characters and hoping a whole message fitted.
+   */
+  const offset = statSync(file).size
   const head = [`## From ${fromTitle}, ${stamp(new Date())}`]
   const bits: string[] = []
   if (meta?.kind) bits.push(`kind \`${meta.kind}\``)
@@ -283,7 +300,98 @@ export function postMessage(
   // Said in the entry itself, so a card replying does not have to be told separately which id to use.
   if (bits.length) head.push('', `${bits.join(', ')}. Reply on this same task id.`)
   appendFileSync(file, `\n${head.join('\n')}\n\n${capped(text)}\n`, 'utf8')
-  return file
+  return { file, offset }
+}
+
+/** How much unread mail a notice carries itself before it points at INBOX.md instead. */
+export const NOTICE_INLINE_MAX = 1500
+
+/**
+ * The unread part of a card's inbox as one line that is safe to type, or null when it will not fit.
+ *
+ * The notice typed into a card used to say only that mail had arrived, and the card then spent a
+ * whole model step reading INBOX.md (canon 06 revision 10). Typed text is keys: a newline submits,
+ * an escape sequence is a key press, so every control character is removed and the entries are
+ * flattened onto one line, each starting where its `## From` heading was.
+ */
+export function unreadInline(sessionId: string, offset: number): string | null {
+  let raw: Buffer
+  try {
+    raw = readFileSync(join(mailDirFor(sessionId), 'INBOX.md'))
+  } catch {
+    return null
+  }
+  if (offset < 0 || offset >= raw.length) return null
+  const text = raw
+    .subarray(offset)
+    .toString('utf8')
+    .replace(/\x1b\[[0-9;?<>]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)?/g, '')
+    .replace(/^## From /gm, '\u0000From ')
+    .replace(/Reply on this same task id\./g, 'Reply on the same task id.')
+    .replace(/[\x00-\x1f\x7f]+/g, (m) => (m.includes('\u0000') ? ' | ' : ' '))
+    .replace(/\s+/g, ' ')
+    .replace(/^\s*\|\s*/, '')
+    .trim()
+  if (!text || text.length > NOTICE_INLINE_MAX) return null
+  return text
+}
+
+/**
+ * The unread marker, written beside INBOX.md where the card's own startup hook can read it.
+ *
+ * A file rather than a database read, because the thing that needs it runs inside the card's
+ * process at launch and reads its mail directory already. Everything it needs is in here: how many
+ * messages are waiting and the byte in INBOX.md where the first of them starts.
+ *
+ * The count is stored as well as the offset, although the offset alone would do, because the board
+ * shows the count and the hook prints it, and deriving it would mean parsing the file twice for a
+ * number the server already knows.
+ */
+export function writeUnreadMarker(sessionId: string, unread: { count: number; offset: number }): void {
+  try {
+    writeFileSync(
+      join(mailDirFor(sessionId), '.unread.json'),
+      `${JSON.stringify({ ...unread, at: Date.now() }, null, 2)}\n`,
+      'utf8',
+    )
+  } catch {
+    // A marker that cannot be written is a badge that does not appear. It must never be the reason
+    // the message itself fails to be filed, so this is deliberately swallowed.
+  }
+}
+
+/**
+ * The card has been told. Record that it is caught up, rather than removing the marker.
+ *
+ * Removing it was the first version, and it was wrong in a way that only showed when the owner asked
+ * to mark a board's old mail as read before a run. No marker has to keep meaning "unknown", because
+ * that is every inbox from before markers existed, and unknown falls back to handing the card the
+ * tail of its inbox as new mail. So an absent marker could not also mean "nothing unread": a card
+ * whose backlog had been deliberately cleared would have been handed the last 400 characters of it
+ * anyway, under a heading saying it arrived while the card was off.
+ *
+ * A count of zero at the current end of the file is the explicit answer. The hook reads it as
+ * "hand over nothing", and the next message filed replaces it with a real count and offset.
+ */
+export function clearUnreadMarker(sessionId: string): void {
+  try {
+    const dir = mailDirFor(sessionId)
+    let size = 0
+    try {
+      size = statSync(join(dir, 'INBOX.md')).size
+    } catch {
+      // No inbox yet is size zero, and the marker still says the card is caught up.
+    }
+    writeFileSync(
+      join(dir, '.unread.json'),
+      `${JSON.stringify({ count: 0, offset: size, at: Date.now() }, null, 2)}
+`,
+      'utf8',
+    )
+  } catch {
+    // Cosmetic for the board and never worth failing a delivery over.
+  }
 }
 
 /**
@@ -359,7 +467,9 @@ export function writePowers(
     'Garden maintains this file from the settings on this card. Some of it the CLI enforces and',
     'some of it is a request to you, and each line below says which.',
     '',
-    `- You answer to ${answersTo ? `the card "${answersTo}"` : 'the owner directly'}. A request.`,
+    answersTo
+      ? `- You answer to the card "${answersTo}". A request.`
+      : `- ${noReportingLine(session.roleClass)} A request.`,
   ]
 
   /*
@@ -375,7 +485,7 @@ export function writePowers(
     lines.push(`- You are the ${session.roleClass}: ${role?.summary ?? session.roleClass}.`)
     if (role) {
       lines.push(`  ${role.enforced}`)
-      lines.push(`  Denied by the CLI: ${role.denies.join(', ')}.`)
+      lines.push(role.denies.length ? `  Denied by the CLI: ${role.denies.join(', ')}.` : '  Nothing is denied to you by the CLI.')
     }
     /*
      * The duty that comes with having anyone below you. Enforced, and said so, because the owner
@@ -403,18 +513,22 @@ export function writePowers(
    *
    * Said as a preference and not enforced, deliberately. Denying the tool would stop an agent
    * reaching for help mid-task, which is the case where it is exactly right.
+   *
+   * Only to a card that can spawn one. It used to go to every role, so a worker read "Denied by the
+   * CLI: Agent" and, two lines later, "spawn as many subagents as you need". The size comes from
+   * canon 16: most work needs none or one.
    */
-  lines.push(
-    '- Do your own work with your own subagents, and hand OUT the work that is not yours. A request.',
-    '  The test is whose job it is, not how hard it is. Work inside your own part is yours: spawn as',
-    '  many subagents as you need for reading around a problem, a search, a tool call or a second',
-    '  opinion, and finish it yourself. Work that belongs to another card goes to that card, because',
-    '  it was hired for it and starts from roots, instructions and reading that you do not have. You',
-    '  would be redoing from scratch what somebody else already knows.',
-    '  A card on the board can be watched, messaged, stopped and picked up again, and what passes',
-    '  between two cards is recorded in both their mailboxes. A subagent runs inside your session',
-    '  and is gone when it finishes, so nobody owns what it did.',
-  )
+  const powers = session.roleClass ? ROLE_POWERS[session.roleClass] : undefined
+  const spawns = session.canSpawnAgents && session.teamSize !== 0 && !powers?.denies.includes('Agent')
+  if (spawns) {
+    lines.push(
+      '- Finish the work that is yours, and hand out the work that is not. A request. Work that',
+      '  belongs to another card goes to that card, which starts from roots and reading you do not',
+      '  have. A subagent is for a question whose answer is text you can check, such as a search or a',
+      '  second opinion. Most work needs none or one. Work someone should own goes to a card, which',
+      '  can be watched, messaged and picked up again; a subagent is gone when it finishes.',
+    )
+  }
 
   /*
    * How a card on this board comes to exist, which is the thing no card could previously find out.
@@ -426,35 +540,37 @@ export function writePowers(
    *
    * Both halves are stated, because which one applies is decided by the server from this card's own
    * role and not by anything the card passes.
+   *
+   * Not to a role that hands nothing out. A worker, a reviewer or a verifier that needs another
+   * card tells the card it answers to, which is what its role file says; this paragraph used to
+   * reach them anyway, twenty-one lines on hiring under a role file saying nothing talks about it.
    */
-  const creates = !!(session.roleClass && ROLE_POWERS[session.roleClass]?.creates)
-  lines.push(
-    creates
-      ? '- You are the one card that may bring another card into existence. Everything else asks you.'
-      : '- You cannot create a card yourself, and you do not need to. Ask, and the orchestrator answers.',
-    '  The command, either way. Write the roots to a file first, with your file writing tool:',
-    '',
-    '  ```',
-    `  node "${forward(hireShimPath())}" --title "Loader worker" --role worker \\`,
-    `    --reports-to ${session.id} --file "${forward(outboxDirFor(session.id))}/roots.md"`,
-    '  ```',
-    '',
-    '  The roots are required and they go in the file, never inside the command: say what the card',
-    '  is for, the part of the work it owns, what it must not touch, and who it defers to for the',
-    '  rest. A card hired without them reads only the project instructions and answers as whatever',
-    '  those describe rather than as the thing you hired. Real roots run to thousands of characters,',
-    '  and a command carrying that much cannot be security scanned, so it stops and waits for the',
-    '  owner.',
-    '',
-    '  `--reports-to` is in the example on purpose and leaving it out is not the safe default it',
-    '  looks like. Without it the card is created with NO PARENT, which means no wire, which means',
-    '  nothing can speak to it and it cannot answer. Pass another card id to put it under someone',
-    '  else, or `garden-wire.mjs` afterwards to connect one that is already standing on its own.',
-    creates
-      ? '  Cards are created switched off. Start one with `--start <card id>` when you want it working.'
-      : '  Your request is filed as mail to the orchestrator and answered along a wire. Nothing is',
-    creates ? '' : '  created until it agrees.',
-  )
+  const creates = !!powers?.creates
+  if (!powers || powers.hires) {
+    lines.push(
+      creates
+        ? '- You are the one card that may bring another card into existence. Everything else asks you.'
+        : '- You cannot create a card yourself, and you do not need to. Ask, and the orchestrator answers.',
+      '  The command, either way. Write the brief to a file first, with your file writing tool:',
+      '',
+      '  ```',
+      `  node "${forward(hireShimPath())}" --title "Loader worker" --role worker \\`,
+      `    --reports-to ${session.id} --owns "src/loader" --file "${forward(outboxDirFor(session.id))}/roots.md"`,
+      '  ```',
+      '',
+      '  The brief is required and goes in the file, never inside the command, which cannot be',
+      '  security scanned past a few thousand characters and stops for the owner. What a brief holds,',
+      '  and what it leaves out, is in `~/.garden/roots/detail/composing-roots.md`: read it first.',
+      '',
+      '  Pass `--reports-to` every time. Without it the card has no parent and no wire, so nothing can',
+      '  speak to it and it cannot answer. Pass another card id to put it under someone else, or use',
+      '  `garden-wire.mjs` afterwards to connect a card that is already standing on its own.',
+      creates
+        ? '  Cards are created switched off. Start one with `--start <card id>` when you want it working.'
+        : '  Your request is filed as mail to the orchestrator and answered along a wire. Nothing is',
+      creates ? '' : '  created until it agrees.',
+    )
+  }
 
   /*
    * The task contract, printed for the same reason the other two shims are.
@@ -516,20 +632,31 @@ export function writePowers(
       '  Reading is not limited and never will be: read whatever you need to understand your own',
       '  part, and only put bytes on disk inside it.',
     )
-  } else {
+  } else if (!powers || session.roleClass === 'orchestrator') {
     lines.push('- No part of the project was marked as yours, so nothing narrows where you may work.')
+  } else {
+    /*
+     * A hired card with no territory used to read the line above as leave to edit anywhere, while
+     * its role file said to stay inside what it owns. Nothing is enforced either way; this says what
+     * "yours" means when nothing was assigned. The orchestrator and a card the owner made by hand
+     * with no role keep the line above, because the person directing them is the one asking.
+     */
+    lines.push(
+      '- No paths were assigned to you, so nothing is enforced. Edit only what your brief, your work',
+      '  order or the request in front of you names, and ask the card you answer to before anything else.',
+    )
   }
 
-  if (!session.canSpawnAgents || session.teamSize === 0) {
-    lines.push('- You may not hire agents at all. Enforced: the tool is denied and will refuse.')
+  if (!spawns) {
+    lines.push('- You may not spawn subagents. Enforced: the Agent tool is denied and will refuse.')
   } else if (session.teamSize && session.teamSize > 0) {
     lines.push(
-      `- Keep to ${session.teamSize} helper${session.teamSize === 1 ? '' : 's'} at a time. Partly enforced: the`,
-      `  CLI caps how many run at once, but nothing stops you hiring more than ${session.teamSize} over a whole`,
+      `- Keep to ${session.teamSize} subagent${session.teamSize === 1 ? '' : 's'} at a time. Partly enforced: the`,
+      `  CLI caps how many run at once, but nothing stops you spawning more than ${session.teamSize} over a whole`,
       '  session, so the total is up to you.',
     )
   } else {
-    lines.push('- No limit was set on hiring, so the CLI default applies.')
+    lines.push('- No limit was set on subagents, so the CLI default applies.')
   }
 
   lines.push('', `Your inbox is ${join(dir, 'INBOX.md')} and who you are wired to is in PEERS.md.`, '')

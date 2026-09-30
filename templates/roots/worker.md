@@ -37,6 +37,10 @@ say whose.>
   directory.
 - Two sessions in one checkout is normal. Check for another session's claim before editing, and write
   your own for what you take. Procedure: the `session-claims` skill.
+- A change someone will see ends with you opening your own screenshots and writing what they show
+  against what was meant: text quoted, positions, anything cut off or overlapping. That list is the
+  review; "looks fine" is not. For a second eye, send your manager the before and after shots and
+  the tasks they should make easy, and it spawns a blind comparison. Canon 14 revision 10.
 - <House style.>
 
 ## What will bite you here

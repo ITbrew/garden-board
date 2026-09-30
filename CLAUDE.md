@@ -17,7 +17,7 @@ when the task matches its description rather than reading them all up front.
 | `hiring-a-card` | creating a card and giving it a specialized role |
 | `card-roots` | writing the brief a new card runs from |
 | `canon-library` | writing and revising the description of what the app is |
-| `double-blind-review` | verifying a visible change without grading your own screenshot |
+| `double-blind-review` | reviewing a visible change: your own look, and the optional blind before-and-after comparison |
 | `session-claims` | two sessions in one checkout |
 | `exit-interview` | closing a session so what was learned survives it |
 
@@ -39,19 +39,27 @@ Concretely, that forbids: inferring a stage happened from silence, regexing pros
 an agent did, showing a subagent as interactive when its process has ended, and claiming a
 session survived an app restart when a Windows process cannot be re-parented.
 
-## Blind review: default ON
+## Reviewing a visible change: your own look first, a blind comparison when it is worth it
 
-Every change with a visible surface ends with a double-blind pass. Capture with:
+Every change with a visible surface ends with the author looking at its own screenshots. Capture with:
 
 ```
 npm run dev          # both servers must be running
 node scripts/capture.mjs
 ```
 
-Shots land in `docs/shots/`. Then hand the image paths to a **freshly spawned** subagent with
-neutral questions only, per the `double-blind-review` skill. The agent that wrote the code must
-not open the screenshots to judge them, and must not use a `fork` as the reviewer. Relay what the
-reviewer found, roughly verbatim. If no blind pass ran, say so in the completion message.
+Shots land in `docs/shots/`. Open them and write what they show: text quoted as it appears, where
+things sit, anything cut off, overlapping, faint or missing, each against what the change meant to
+produce. That list is the review. "Looks fine" is not, and is never offered as one. For a new
+screen or a redesign, start from a target image (the owner's mock, or the screen as it is now) and
+list the differences from it.
+
+A blind comparison is optional and the author's call, per the `double-blind-review` skill: a
+**freshly spawned** `blind-reviewer` (never a `fork`) gets the before and after shots of the same
+screen, labelled A and B in random order, and is asked what differs and which it would choose for
+tasks named in a user's words. Worth it when the change is about whether something reads clearly,
+when your own review is unsure, or when the owner asks. Quote its findings file; it marks each item
+blocking or preference, and only blocking items must be fixed. Canon 14 revision 10.
 
 Debugging geometry or content by querying the DOM through the capture script is fine and
 encouraged. That is reading data, not grading pixels.

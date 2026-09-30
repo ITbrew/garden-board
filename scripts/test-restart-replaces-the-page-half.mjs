@@ -95,7 +95,9 @@ writeFileSync(
   [
     "import { createServer } from 'node:net'",
     "import { appendFileSync } from 'node:fs'",
-    'const [port, label, marker] = process.argv.slice(2)',
+    'const [given, label, marker] = process.argv.slice(2)',
+    // "env" is the page half taking its port the way the real one does, from GARDEN_WEB_PORT.
+    "const port = given === 'env' ? process.env.GARDEN_WEB_PORT : given",
     'const s = createServer((c) => c.end())',
     "s.listen(Number(port), '127.0.0.1', () => appendFileSync(marker, label + ' ' + process.pid + '\\n'))",
     'setInterval(() => {}, 60_000)',
@@ -116,7 +118,7 @@ writeFileSync(
       type: 'module',
       // The helper starts the page half exactly as the launcher does, through npm, so this is the
       // one place the test gets to say what "the page half" is.
-      scripts: { 'dev:web': `node listener.mjs ${webPort} web web.marker` },
+      scripts: { 'dev:web': 'node listener.mjs env web web.marker' },
     },
     null,
     2,
@@ -242,17 +244,21 @@ await sleep(1500)
 check('with no --web-port, a page half already running is left alone', alive(bystander.pid), `pid ${bystander.pid}`)
 check('and it still holds its port', await listening(otherPort), `port ${otherPort}`)
 
-// --- told, but nothing is there: nothing is started ---
+// --- told, but nothing is there: one is started ---
 
 /*
- * Replace rather than ensure. A port with nothing on it means the board is served some other way,
- * most likely the built app on the backend's own port, and a dev server nobody asked for is not a
- * restart.
+ * Ensure, not only replace. This asserted the opposite until 2026-09-29, and that rule is what made
+ * a restart after Vite had died a two-step one: "it should be a one shot for vite/garden reset. not
+ * 2 step process like it has been". Canon 22 revision 9.
  */
 const emptyPort = await freePort()
 await runHelper(await freePort(), ['--web-port', String(emptyPort)])
-await sleep(2000)
-check('a page half that was not running is not started', !(await listening(emptyPort)), `port ${emptyPort}`)
+let emptyUp = false
+for (let i = 0; i < 60 && !emptyUp; i++) {
+  emptyUp = await listening(emptyPort)
+  if (!emptyUp) await sleep(500)
+}
+check('a page half that was not running is started', emptyUp, `port ${emptyPort}`)
 
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASS')
 stop(failures ? 1 : 0)

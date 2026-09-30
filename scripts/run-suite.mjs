@@ -23,6 +23,7 @@
  * longer needs excusing.
  */
 import { spawn } from 'node:child_process'
+import { connect } from 'node:net'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,8 +31,75 @@ import { fileURLToPath } from 'node:url'
 const HERE = resolve(fileURLToPath(import.meta.url), '..')
 const ROOT = resolve(HERE, '..')
 
+/*
+ * Refuse to run while a board is open on this machine.
+ *
+ * `check-no-live-board.mjs` reads the text of every test looking for the live port, and it is a good
+ * guard against a test that NAMES the board. It cannot catch a test that reaches the board without
+ * naming it, and it says nothing at all about whether a board is running right now.
+ *
+ * On 2026-09-18 the other PC ran this suite with the owner's board open. He watched Vite restart in
+ * a loop and his board reset repeatedly, and reported it as a launcher bug; it was the suite. The
+ * exact mechanism is not established and the two tests first blamed both ask the OS for a free port
+ * and work in temp directories, so this is deliberately not a fix aimed at those two files. It is
+ * the blunt version of the rule the roots already state: a test gets its own instance, its own port
+ * and its own directory, and the cheapest way to guarantee the owner's board is not that instance is
+ * to decline to start while it is up.
+ *
+ * Both ports matter. 5178 is the backend and 5177 is Vite under `strictPort`, which is the one no
+ * static check was watching.
+ */
+const listening = (port) =>
+  new Promise((done) => {
+    const probe = connect({ port, host: '127.0.0.1' })
+    probe.setTimeout(500)
+    const settle = (answer) => {
+      probe.destroy()
+      done(answer)
+    }
+    probe.on('connect', () => settle(true))
+    probe.on('timeout', () => settle(false))
+    probe.on('error', () => settle(false))
+  })
+
+/*
+ * Read out of the sources that define them rather than written here, so moving a port cannot leave
+ * this watching one nobody uses. Same reasoning as check-no-live-board.mjs, which reads the backend
+ * port the same way. The web port's home is the vite config, since that is what binds it.
+ */
+const portFrom = (file, pattern, fallback) => {
+  try {
+    const found = readFileSync(join(ROOT, file), 'utf8').match(pattern)
+    return found ? Number(found[1]) : fallback
+  } catch {
+    return fallback
+  }
+}
+const BOARD_PORTS = [
+  portFrom('packages/shared/src/index.ts', /export const DEFAULT_PORT\s*=\s*(\d+)/, 5178),
+  portFrom('apps/web/vite.config.ts', /port:\s*(\d+)/, 5177),
+]
+
+const busy = []
+for (const p of BOARD_PORTS) if (await listening(p)) busy.push(p)
+if (busy.length && !process.argv.includes('--board-is-not-mine')) {
+  console.log(`\nREFUSED. A board is answering on ${busy.join(' and ')} on this machine.`)
+  console.log('\nThis suite starts and stops real Gardens, and it has disturbed a live board before:')
+  console.log('the owner saw Vite restarting in a loop and blamed the launcher. Close the board and')
+  console.log('run this again. Nothing has been run and nothing has been changed.')
+  console.log('\nIf those ports genuinely belong to something that is not the owner\'s board, say so:')
+  console.log('  node scripts/run-suite.mjs --board-is-not-mine')
+  process.exit(1)
+}
+
 /** These launch a real CLI and spend real tokens. Held back by default, never hidden. */
-const PAID = new Set(['test-hook-live.mjs', 'test-live-session.mjs', 'test-live-dispatch.mjs', 'test-message-card-live.mjs'])
+const PAID = new Set([
+  'test-hook-live.mjs',
+  'test-live-session.mjs',
+  'test-live-dispatch.mjs',
+  'test-message-card-live.mjs',
+  'test-live-one-entry-wakes-a-card.mjs',
+])
 
 const args = process.argv.slice(2)
 const withPaid = args.includes('--paid')
@@ -42,6 +110,24 @@ const all = readdirSync(HERE)
   .filter((f) => f.startsWith('test-') && f.endsWith('.mjs'))
   .filter((f) => (only ? f.includes(only) : true))
   .sort()
+
+/*
+ * The one unit test that lives beside the code it tests rather than in here.
+ *
+ * Everything else in this directory drives a real instance, so `scripts/` is the right home for it.
+ * `profiles.test.ts` is a different kind of thing: it calls one pure function with fixtures in a
+ * temp directory, and a unit test belongs next to its unit. Node 24 strips the types and runs the
+ * `.ts` directly, and `runOne` joins against HERE, so the relative path resolves.
+ *
+ * Named explicitly rather than discovered, because a glob over `server/src` would quietly start
+ * running anything anyone later names `*.test.ts` from a suite that spends real money on some of
+ * its entries. One line per test that lives outside this folder is a cheap price for that.
+ *
+ * The card that wrote the test could not add this line: it owns `server/src/profiles.test.ts` and
+ * Garden refused it the write, correctly, rather than let two cards edit one file. So the test was
+ * green and not in the suite, which is the worst of both.
+ */
+if (!only || 'profiles.test.ts'.includes(only)) all.push('../server/src/profiles.test.ts')
 
 /*
  * Tests that cannot run from this checkout at all, whatever anyone passes.
@@ -85,7 +171,7 @@ const TIMEOUT_MS = 300_000
 function runOne(file) {
   return new Promise((done) => {
     const started = Date.now()
-    const child = spawn(process.execPath, [join(HERE, file)], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, [join(HERE, file)], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     let out = ''
     child.stdout.on('data', (b) => (out += b))
     child.stderr.on('data', (b) => (out += b))

@@ -13,7 +13,7 @@
  *
  * Usage, from inside a session. Write the message to a file with a file writing tool, then name it:
  *   node <this> --to <card id> --kind done --task T-12 --file "<mail dir>/outbox/T-12.md"
- *   node <this> --to "Loader team" --kind work --task T-12 --text "one short line, no quotes"
+ *   node <this> --to "Loader team" --kind work --task T-12 --text 'one short paragraph, no quotes'
  *
  * The body never goes inside the command, and both remaining ways of doing that are kept only for
  * what already uses them. A quote inside a --text value is reopened by the shell before this script
@@ -100,7 +100,7 @@ for (let i = 2; i < process.argv.length; i += 2) {
         'Your shell probably reopened the command line at a quote inside your\n' +
         'message, so the rest of it arrived as stray arguments and only the part\n' +
         'before the quote would have been delivered.\n' +
-        'Pipe the message in on stdin instead of passing --text.',
+        'Write the message to a file and pass --file instead of --text.',
     )
   }
   if (flags.has(name)) {
@@ -108,7 +108,7 @@ for (let i = 2; i < process.argv.length; i += 2) {
       `Nothing was sent. --${name} was given twice.\n` +
         'If you only wrote it once, your shell broke your message apart at a quote\n' +
         'and part of it is now being read as a flag.\n' +
-        'Pipe the message in on stdin instead of passing --text.',
+        'Write the message to a file and pass --file instead of --text.',
     )
   }
   flags.set(name, process.argv[i + 1])
@@ -273,7 +273,9 @@ try {
  *     outcome that must not exist.
  *   - A tty short-circuits immediately, as before, because a human at a terminal is not piping.
  */
-const FIRST_BYTE_WAIT_MS = inline || fromFile ? 1000 : 10000
+// 150 ms beside a body: a pipe that carries a second copy has written it long before then, and the
+// full second this used to be was spent on every send (canon 06 revision 10).
+const FIRST_BYTE_WAIT_MS = inline || fromFile ? 150 : 10000
 const MID_MESSAGE_IDLE_MS = 10000
 
 const readStdin = () =>

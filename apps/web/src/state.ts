@@ -20,6 +20,14 @@ import { asPipelineRuns, type PipelineRun } from './pipeline-types'
 
 export interface AppState {
   connected: boolean
+  /**
+   * True from asking for the OS folder dialog until the server says that pick ended.
+   *
+   * The dialog is modal and owned by an invisible form, so a second one opens on top of the first
+   * and leaves it behind the window with no taskbar button, which is the exact symptom the raise
+   * fix exists to cure. Cheaper to not open the second one.
+   */
+  pickInFlight: boolean
   projects: Project[]
   profiles: Profile[]
   sessions: TerminalSession[]
@@ -63,6 +71,7 @@ const MAX_FOCUSED = 4
 
 let state: AppState = {
   connected: false,
+  pickInFlight: false,
   projects: [],
   profiles: [],
   sessions: [],
@@ -534,6 +543,8 @@ export type AgentTurn = {
   at: number | null
   /** The whole thing, present only when `text` is a shortened version of it. */
   full?: string
+  /** Byte offset of the transcript line this came from. What lets pages merge; see `mergeChat`. */
+  off?: number
 }
 
 /*
@@ -541,6 +552,86 @@ export type AgentTurn = {
  * terminal bytes and document text: an agent answering should redraw its card, not the canvas.
  */
 const agentChats = new Map<string, AgentTurn[]>()
+/**
+ * Where each card's loaded conversation begins, and whether that is the start of the transcript.
+ *
+ * Kept beside the turns rather than inside them because it is about the set, not about any turn.
+ * `loading` stops a card from asking for the same older page twice while the first answer is on its
+ * way, which a scroll gesture would otherwise do dozens of times a second.
+ */
+const chatPaging = new Map<string, { cursor: number; atStart: boolean; file?: string; loading: number }>()
+
+/**
+ * Fold one page into what a card already holds.
+ *
+ * Two directions arrive at one list. The newest turns are pushed whenever the transcript changes;
+ * older ones arrive when the owner scrolls up. Before this, every push replaced the list with the
+ * last sixty turns, so a card he had scrolled back through snapped back to the bottom the moment the
+ * agent said anything.
+ *
+ * Every turn carries the byte offset of its line, and every page says the offset it began at, so
+ * the rule is exact rather than a guess about overlap. An older page covers only lines before what
+ * is held, so it goes in front. A newest page replaces only what lies at or after its own start and
+ * leaves everything older alone.
+ *
+ * A page from a different file starts over, because a card that resumes into a new conversation
+ * gets a new transcript and offsets from the old one mean nothing in it. A page with no offsets at
+ * all is from a server older than paging and is taken whole, which is exactly what used to happen.
+ */
+function mergeChat(msg: {
+  sessionId: string
+  turns: AgentTurn[]
+  cursor?: number
+  atStart?: boolean
+  older?: boolean
+  file?: string
+}): void {
+  const had = agentChats.get(msg.sessionId)
+  const paging = chatPaging.get(msg.sessionId)
+  const pageable = typeof msg.cursor === 'number' && msg.turns.every((t) => typeof t.off === 'number')
+
+  if (!pageable) {
+    agentChats.set(msg.sessionId, msg.turns)
+    chatPaging.delete(msg.sessionId)
+    return
+  }
+  const cursor = msg.cursor as number
+  const fresh = !had || !paging || paging.file !== msg.file
+
+  if (fresh) {
+    // An older page for a list this window has since started over is an answer to a stale
+    // question, and dropping it is right: the next scroll asks again from the new list.
+    if (msg.older) return
+    agentChats.set(msg.sessionId, msg.turns)
+    chatPaging.set(msg.sessionId, { cursor, atStart: !!msg.atStart, file: msg.file, loading: 0 })
+    return
+  }
+
+  if (msg.older) {
+    const kept = had.filter((t) => (t.off ?? 0) >= paging.cursor)
+    const before = msg.turns.filter((t) => (t.off ?? 0) < paging.cursor)
+    agentChats.set(msg.sessionId, [...before, ...kept])
+    chatPaging.set(msg.sessionId, { cursor, atStart: !!msg.atStart, file: msg.file, loading: 0 })
+    return
+  }
+
+  const older = had.filter((t) => (t.off ?? 0) < cursor)
+  agentChats.set(msg.sessionId, [...older, ...msg.turns])
+  // The start of what is held only moves if this page reaches further back than anything already
+  // loaded, which a newest page does only on a card nobody has scrolled.
+  const reachesFurther = cursor <= paging.cursor
+  chatPaging.set(msg.sessionId, {
+    cursor: reachesFurther ? cursor : paging.cursor,
+    atStart: reachesFurther ? !!msg.atStart : paging.atStart,
+    file: msg.file,
+    loading: paging.loading,
+  })
+}
+
+/** Whether a card can scroll further up, and whether it is already fetching the page above. */
+export function getChatPaging(sessionId: string) {
+  return chatPaging.get(sessionId)
+}
 /*
  * Told which card changed, rather than just that something did. A board can hold a lot of agent
  * cards and one of them answering should not make every other one re-read its own conversation.
@@ -634,6 +725,17 @@ conn.on((msg: ServerMessage) => {
       return
     }
     case 'project.picked': {
+      // Whatever it carries, this message means that pick is over: chosen, cancelled or refused.
+      set({ pickInFlight: false })
+      return
+    }
+    case 'projects.ordered': {
+      // The order the server keeps. A tab this page has not heard of yet waits at the end.
+      const at = (id: string) => {
+        const i = msg.ids.indexOf(id)
+        return i < 0 ? Number.MAX_SAFE_INTEGER : i
+      }
+      set({ projects: [...state.projects].sort((a, b) => at(a.id) - at(b.id)) })
       return
     }
     case 'project.updated': {
@@ -642,7 +744,10 @@ conn.on((msg: ServerMessage) => {
     }
     case 'project.added': {
       set({
-        projects: [msg.project, ...state.projects.filter((p) => p.id !== msg.project.id)],
+        // At the end beside +, where the server puts a new tab; `projects.ordered` follows with the order.
+        projects: state.projects.some((p) => p.id === msg.project.id)
+          ? state.projects.map((p) => (p.id === msg.project.id ? msg.project : p))
+          : [...state.projects, msg.project],
         activeProjectId: msg.project.id,
         docFiles: [],
       })
@@ -751,7 +856,7 @@ conn.on((msg: ServerMessage) => {
       return
     }
     case 'agent.chat': {
-      agentChats.set(msg.sessionId, msg.turns)
+      mergeChat(msg)
       for (const fn of agentChatSubs) fn(msg.sessionId)
       return
     }
@@ -1004,8 +1109,17 @@ export const actions = {
     conn.send({ t: 'project.setProfile', projectId, adapterId, profileId })
   },
 
-  /** Opens the OS folder dialog and adds whatever is chosen. */
+  /** Opens the OS folder dialog and adds whatever is chosen. Refuses to open a second one. */
+  /** Put the tabs in this order, as he dropped them. Shown at once, and the server keeps it. */
+  reorderProjects(ids: string[]) {
+    const at = (id: string) => ids.indexOf(id)
+    set({ projects: [...state.projects].sort((a, b) => at(a.id) - at(b.id)) })
+    conn.send({ t: 'project.reorder', ids })
+  },
+
   pickProject() {
+    if (state.pickInFlight) return
+    set({ pickInFlight: true })
     conn.send({ t: 'project.pick' })
   },
 
@@ -1157,6 +1271,11 @@ export const actions = {
 
   input(sessionId: string, data: string) {
     conn.send({ t: 'session.input', sessionId, data })
+  },
+
+  /** A whole line for the server to type once the CLI can take it, and to confirm was submitted. */
+  line(sessionId: string, text: string) {
+    conn.send({ t: 'session.line', sessionId, text })
   },
 
   /**
@@ -1461,6 +1580,25 @@ export const actions = {
    */
   readAgentChat(sessionId: string) {
     conn.send({ t: 'agent.chat', sessionId })
+  },
+
+  /**
+   * The page above what a card is holding, asked for when the owner scrolls to the top of it.
+   *
+   * Asks from the cursor the last page handed back, which is always the start of a transcript line,
+   * so the server reads only the bytes that page needs however large the file is. Does nothing at
+   * the start of the conversation, and nothing while the previous request is still out.
+   */
+  readOlderAgentChat(sessionId: string) {
+    const paging = chatPaging.get(sessionId)
+    /*
+     * `loading` is when the request went out rather than a yes or no, so a request that never comes
+     * back, lost to a reconnect or a server restart, stops blocking after a while. As a boolean it
+     * would have stayed true for good and that card could never scroll further up again.
+     */
+    if (!paging || paging.atStart || Date.now() - paging.loading < 10_000) return
+    chatPaging.set(sessionId, { ...paging, loading: Date.now() })
+    conn.send({ t: 'agent.chat', sessionId, before: paging.cursor })
   },
 
   /**

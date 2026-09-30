@@ -191,13 +191,14 @@ themselves ship in `.claude/skills/`:
 | `hiring-a-card` | orchestrator | the procedure for creating a card and giving it a role |
 | `canon-library` | orchestrator | writing and revising the description of what the app is |
 | `card-roots` | orchestrator, manager | what makes a set of roots worth having |
-| `double-blind-review` | orchestrator, manager | verifying a visible change without grading your own screenshot |
+| `double-blind-review` | every role that makes things, and a card with no role | reviewing a visible change: your own look at your screenshots, and the optional blind before-and-after comparison |
 | `session-claims` | all but reviewer and verifier | not colliding with another session in the same checkout |
 | `exit-interview` | every role | closing a session by writing what was learned where it survives |
 
-A worker keeps only the last two. It hires nobody, so `card-roots` would describe something it cannot
-do, and it is denied `Agent`, so `double-blind-review` would brief it to spawn a reviewer it cannot
-spawn. A brief describing a refused capability is worse than no brief.
+A worker keeps `double-blind-review` and the last two. It hires nobody, so `card-roots` would describe
+something it cannot do. It reviews its own screenshots itself, and the skill tells it to hand a blind
+comparison to its manager, since it is denied `Agent` (canon 14 revision 10). A brief describing a
+refused capability is worse than no brief.
 
 `canon-library` is deliberately withheld from every role that does the work. A card that can both do
 the work and revise the description of what the work was meant to be can never be found wrong.

@@ -15,6 +15,8 @@
  * That is the whole point of the test. Nothing here touches the live board.
  */
 import { openBoard } from './lib/board.mjs'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failures = 0
@@ -51,7 +53,15 @@ const readBack = async (cardId) => {
 for (const c of [self, other]) board.ws.send(JSON.stringify({ t: 'session.start', sessionId: c.id }))
 await sleep(4000)
 
-const CLI = 'node C:/Garden/server/bin/garden-loop.mjs'
+/*
+ * Derived from this file's own location, never hardcoded.
+ *
+ * This said `C:/Garden` and the checkout is `E:\Garden`, so the test failed on a missing module
+ * rather than on anything it was written to check: the card ran the command, node could not find
+ * `garden-loop.mjs`, and the assertion about the card being told why failed with the loader's
+ * error. A test that only passes on one machine's drive letter is not testing what it says.
+ */
+const CLI = `node ${resolve(fileURLToPath(import.meta.url), '../../server/bin/garden-loop.mjs').replace(/\\/g, '/')}`
 // An hour apart and a harmless prompt: this test is about the switch, not about the tick.
 for (const c of [self, other]) {
   board.ws.send(

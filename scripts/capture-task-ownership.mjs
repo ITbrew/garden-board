@@ -34,16 +34,19 @@
 import { createRequire } from 'node:module'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { startInstance } from './lib/instance.mjs'
 
 // Resolved from the repository root rather than from beside this file, because this file is not
-// where its dependencies are and the whole reason for that is in the header above.
-const require = createRequire('C:/Garden/package.json')
+// where its dependencies are and the whole reason for that is in the header above. The root is
+// derived from this file's location: it was the literal `C:/Garden`, which this checkout is not.
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const require = createRequire(join(ROOT, 'package.json'))
 const WebSocket = require('ws')
 const puppeteer = require('puppeteer-core').default ?? require('puppeteer-core')
 
-const OUT = 'C:\\Garden\\docs\\shots'
+const OUT = join(ROOT, 'docs', 'shots')
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 const WIDTH = 2200
 const HEIGHT = 1500
