@@ -12,7 +12,7 @@
  * can wedge the terminals it exists to manage would be worse than no tool.
  */
 import { request } from 'node:http'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const PORT = Number(process.env.GARDEN_PORT) || 5178
@@ -897,6 +897,16 @@ function sessionStartContext() {
       'ROOTS.md there says what to open and the condition that means open it now. Your notes and your',
       'playbook are in that same directory. Read from them when the task calls for it rather than at',
       'the start: reading widely to feel prepared is what cancels the reason this board exists.',
+      '',
+    )
+  }
+  // Canon 30: said only once there is a library, and never its contents.
+  if (process.env.GARDEN_HISTORY_DIR && existsSync(join(process.env.GARDEN_HISTORY_DIR, 'INDEX.md'))) {
+    parts.push(
+      `Older parts of this conversation are your own library, in ${process.env.GARDEN_HISTORY_DIR}. INDEX.md`,
+      'lists each file by date. Work from your roots and current goals; look there only when the work needs',
+      'something from before, and keep what is worth keeping in NOTES.md beside it. The folder is ignored by',
+      'git, so a search tool that respects ignore files can skip it: use plain grep -r on the path.',
       '',
     )
   }

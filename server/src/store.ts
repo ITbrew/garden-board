@@ -72,6 +72,16 @@ export class Store {
     mkdirSync(dirname(path), { recursive: true })
     this.db = new Database(path)
     this.db.pragma('journal_mode = WAL')
+    /*
+     * Every read and write here runs on the server's one thread, so a query that has to go to a busy
+     * disk stops the board (canon 01). A cache of 1 GB keeps the database in memory once read; it only
+     * uses what is actually read, and the database is smaller than this. NORMAL stops waiting for the
+     * disk on every commit. In WAL mode that cannot corrupt the file: a power cut can lose the last
+     * few writes, which the board can afford and the freezes showed it could not afford otherwise.
+     */
+    this.db.pragma('cache_size = -1000000')
+    this.db.pragma('synchronous = NORMAL')
+    this.db.pragma('temp_store = MEMORY')
     this.migrate()
   }
 
@@ -337,6 +347,7 @@ export class Store {
         resolvedAt INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_findings_live ON findings(state, kind, subject);
+      CREATE INDEX IF NOT EXISTS idx_findings_noted ON findings(lastSeen) WHERE note IS NOT NULL AND note != '';
 
       -- Claude Code deletes these off disk after 30 days. This table is the copy that outlives
       -- that rotation, so a session or subagent run is still readable long after the CLI has
@@ -1469,6 +1480,12 @@ export class Store {
   }
 
   // --- work records ---
+
+  /** What a card was last asked, without loading its work history to find out. */
+  lastAsk(sessionId: string): string | null {
+    const row = this.db.prepare('SELECT ask FROM work WHERE sessionId = ? ORDER BY startedAt DESC LIMIT 1').get(sessionId) as { ask: string } | undefined
+    return row?.ask ?? null
+  }
 
   listWork(sessionId: string): WorkRecord[] {
     const rows = this.db.prepare('SELECT * FROM work WHERE sessionId = ? ORDER BY startedAt DESC LIMIT 200')

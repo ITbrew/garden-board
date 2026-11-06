@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import {
@@ -43,7 +43,9 @@ import { Watchdog } from './watchdog.js'
 import { boardMarkdown, openTodos, readPrompt, since } from './pilot.js'
 import { clearUnreadMarker, mailDirFor, postMessage, recordSent, unreadInline, writePeers, writePowers, writeUnreadMarker, type Peer } from './mail.js'
 import { hasSubstance, historyDirFor, stamp, writeAgentHistory, writeHistory } from './history.js'
-import { readChat, readChatPage, renderTranscript } from './transcript.js'
+import { writeFile as writeFilePromise } from 'node:fs/promises'
+import { readChat, readChatPageAsync, renderTranscript } from './transcript.js'
+import { readProfiles, type ProfileReading } from './profile-reader.js'
 import { reachAgent } from './agent-reach.js'
 import {
   MAIL_KINDS,
@@ -339,12 +341,25 @@ function nextPosition(projectId: string): { x: number; y: number } {
  * Discovered profiles keep a stable id derived from their directory, so binding one to a project
  * survives restarts.
  */
-function adoptDiscoveredAccounts(): void {
-  for (const a of discoverAccounts()) {
+/** Writes a profile only when something in it changed, so a quiet refresh does not touch the database. */
+function saveProfile(next: NonNullable<ReturnType<typeof store.getProfile>>): void {
+  const had = store.getProfile(next.id)
+  if (
+    had &&
+    had.name === next.name &&
+    had.accountEmail === next.accountEmail &&
+    had.accountName === next.accountName &&
+    had.organizationName === next.organizationName
+  ) return
+  store.upsertProfile(next)
+}
+
+function adoptDiscoveredAccounts(found = discoverAccounts()): void {
+  for (const a of found) {
     const id = `dir:${a.configDir.toLowerCase()}`
     const existing = store.getProfile(id)
     const email = a.identity?.email ?? a.declaredEmail ?? null
-    store.upsertProfile({
+    saveProfile({
       id,
       name: existing?.name ?? (email ? email.split('@')[0]! : a.configDir),
       adapterId: 'claude',
@@ -364,8 +379,7 @@ function adoptDiscoveredAccounts(): void {
  * a project added later, or one rebound by anything that slipped past the picker's refusal, is put
  * back within one refresh. Projects that changed are announced so the tab shows the account it runs as.
  */
-function applyAccountRule(): void {
-  const rule = readAccountRule(DATA_DIR)
+function applyAccountRule(rule = readAccountRule(DATA_DIR)): void {
   if (!rule) return
   for (const adapterId of ['claude', 'codex'] as const) {
     const dir = rule[adapterId]
@@ -393,15 +407,19 @@ function applyAccountRule(): void {
   }
 }
 
-function refreshProfiles(): void {
-  adoptDiscoveredAccounts()
-  applyAccountRule()
+function refreshProfiles(reading?: ProfileReading): void {
+  adoptDiscoveredAccounts(reading?.discovered)
+  applyAccountRule(reading?.rule)
   for (const p of store.listProfiles()) {
+    // A profile added just now was not in the reading, so it is the one thing still read here.
+    const identities = reading?.identities
+    const emails = reading?.codexEmails
     // A Codex home keeps no Claude config file, so it is asked the Codex way (canon 29).
-    const acct = p.adapterId === 'codex' ? null : readAccount(p.configDir)
-    store.upsertProfile({
+    const acct = p.adapterId === 'codex' ? null : identities && p.configDir in identities ? identities[p.configDir] : readAccount(p.configDir)
+    const codexEmail = p.adapterId !== 'codex' ? null : emails && p.configDir in emails ? emails[p.configDir] : accountEmailOf('codex', p.configDir)
+    saveProfile({
       ...p,
-      accountEmail: p.adapterId === 'codex' ? accountEmailOf('codex', p.configDir) : acct?.email ?? null,
+      accountEmail: p.adapterId === 'codex' ? codexEmail : acct?.email ?? null,
       accountName: acct?.displayName ?? null,
       organizationName: acct?.organizationName ?? null,
     })
@@ -2937,6 +2955,98 @@ function carryConversation(s: TerminalSession): void {
 }
 
 /**
+ * Moving a card's older conversation into its own library, one card at a time. Canon 30.
+ *
+ * A child process at low priority, because a server thread reading gigabytes is a frozen board, and
+ * one at a time so a boot does not read every conversation at once. Only a conversation no process
+ * holds. Turning a card on ends its rotation first, and nothing has changed until the child's last
+ * step, so a card is never made to wait for this.
+ */
+const rotationQueue: string[] = []
+let rotationNow: { cardId: string; child: ReturnType<typeof spawn> } | null = null
+
+const cardMarker = (folder: string): string | null => {
+  try {
+    return readFileSync(join(folder, '.card'), 'utf8').trim()
+  } catch {
+    return null
+  }
+}
+
+/** `<project>/ai/<card title>/history`, found by the folder's marker so renaming a card keeps it. */
+function cardLibraryDir(s: TerminalSession): string | null {
+  const project = store.getProject(s.projectId)
+  if (!project) return null
+  const ai = join(project.path, 'ai')
+  let names: string[] = []
+  try {
+    names = readdirSync(ai)
+  } catch {
+    // No library yet in this project.
+  }
+  const mine = names.find((name) => cardMarker(join(ai, name)) === s.id)
+  if (mine) return join(ai, mine, 'history')
+  const title = s.title.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/[. ]+$/g, '').trim() || 'card'
+  const taken = names.some((name) => name.toLowerCase() === title.toLowerCase())
+  return join(ai, taken ? `${title} ${s.id.slice(0, 8)}` : title, 'history')
+}
+
+function queueRotation(cardId: string): void {
+  if (process.env.GARDEN_ROTATE === '0' || rotationQueue.includes(cardId)) return
+  rotationQueue.push(cardId)
+  setTimeout(pumpRotation, 3000).unref?.()
+}
+
+function pumpRotation(): void {
+  if (rotationNow || leaving) return
+  const cardId = rotationQueue.shift()
+  if (!cardId) return
+  const s = store.getSession(cardId)
+  const id = s?.claudeSessionId
+  const library = s ? cardLibraryDir(s) : null
+  const src = s && id && s.adapterId === 'claude' && s.kind === 'session' && s.closedAt === null ? transcriptSourceFor(s, id) : null
+  const file = s && src ? carriedPathFor(s, src) : null
+  if (!s || !id || !library || !file || !existsSync(file) || ptys.isLive(cardId) || conversationHeldElsewhere(id, configDirFor(s))) {
+    pumpRotation()
+    return
+  }
+  try {
+    // Ignored by git from inside, so a project's repository can never pick up its cards' history.
+    const root = join(store.getProject(s.projectId)!.path, 'ai')
+    mkdirSync(library, { recursive: true })
+    writeFileSync(join(dirname(library), '.card'), s.id)
+    if (!existsSync(join(root, '.gitignore'))) writeFileSync(join(root, '.gitignore'), '*\n')
+    if (!existsSync(join(root, 'README.md'))) {
+      writeFileSync(join(root, 'README.md'), 'One folder per card on this project. Each holds that card\'s older conversation in history/; start at its INDEX.md.\n')
+    }
+    const script = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'garden-rotate-conversation.mjs')
+    const child = spawn(process.execPath, [script, '--file', file, '--library', library], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true })
+    let said = ''
+    child.stdout?.on('data', (d) => (said += d))
+    child.stderr?.on('data', (d) => (said += d))
+    rotationNow = { cardId, child }
+    child.on('exit', () => {
+      rotationNow = null
+      const line = said.trim().split('\n').pop()
+      if (line && line !== 'nothing to move') console.log(`[garden] ${s.title}: ${line}`)
+      pumpRotation()
+    })
+  } catch (err) {
+    console.warn(`[garden] ${s.title}: could not move its older conversation: ${(err as Error).message}`)
+    pumpRotation()
+  }
+}
+
+/** Ends a rotation of this card, or all of them. The file stays as it was unless the move had finished. */
+function stopRotation(cardId?: string): void {
+  if (cardId) {
+    const at = rotationQueue.indexOf(cardId)
+    if (at >= 0) rotationQueue.splice(at, 1)
+  } else rotationQueue.length = 0
+  if (rotationNow && (!cardId || rotationNow.cardId === cardId)) rotationNow.child.kill()
+}
+
+/**
  * Cards that have mail and have not been told about it yet, by card id, with a count.
  *
  * Delivery already worked in both directions: a card runs the send shim, the server checks the
@@ -4356,6 +4466,22 @@ function pilotLastLine(s: TerminalSession): string | null {
   return rows.length ? rows[rows.length - 1]! : null
 }
 
+/** A card that is off cannot have been asked anything new, so its answer is read once. */
+const lastAskOfOffCard = new Map<string, { since: number | null; ask: string | null }>()
+
+function lastAskFor(s: TerminalSession): string | null {
+  if (ptys.isLive(s.id)) {
+    lastAskOfOffCard.delete(s.id)
+    return store.lastAsk(s.id)
+  }
+  const since = s.statusSince ?? null
+  const known = lastAskOfOffCard.get(s.id)
+  if (known && known.since === since) return known.ask
+  const ask = store.lastAsk(s.id)
+  lastAskOfOffCard.set(s.id, { since, ask })
+  return ask
+}
+
 function pilotBoardFor(orch: TerminalSession): string {
   const project = store.getProject(orch.projectId)
   const now = Date.now()
@@ -4371,7 +4497,7 @@ function pilotBoardFor(orch: TerminalSession): string {
       running: ptys.isLive(s.id),
       blockedOn: pilotBlockedOn(s),
       task: pilotTaskOf(s),
-      lastAsk: store.listWork(s.id)[0]?.ask ?? null,
+      lastAsk: lastAskFor(s),
       lastLine: pilotLastLine(s),
       isYou: s.id === orch.id,
     }))
@@ -4400,11 +4526,11 @@ function writeBoardFile(orch: TerminalSession): void {
   const key = text.replace(/last written .*? Canon 28/, '')
   if (pilotBoardText.get(orch.id) === key) return
   pilotBoardText.set(orch.id, key)
-  try {
-    writeFileSync(join(mailDirFor(orch.id), 'BOARD.md'), text, 'utf8')
-  } catch {
-    /* a card whose mail directory cannot be written is told nothing new; the next sweep tries again */
-  }
+  // Off the thread: a disk that takes its time delays this file and nothing else (canon 01).
+  void writeFilePromise(join(mailDirFor(orch.id), 'BOARD.md'), text, 'utf8').catch(() => {
+    /* a card whose mail directory cannot be written is told nothing new; forget it so the next sweep tries again */
+    pilotBoardText.delete(orch.id)
+  })
 }
 
 /** Each matter an orchestrator has been woken about, so it is told once. */
@@ -4432,7 +4558,9 @@ function wakeOrchestrator(orch: TerminalSession, lines: string[], checkIn: boole
 
 setInterval(() => {
   const now = Date.now()
-  for (const orch of pilotOrchestrators()) writeBoardFile(orch)
+  // Only an orchestrator that is on can read its board, and this ran over 100 cards every 5 s for each
+  // of them regardless (canon 01). One turned on gets its board on the next sweep.
+  for (const orch of pilotOrchestrators()) if (ptys.isLive(orch.id)) writeBoardFile(orch)
 
   for (const orch of pilotOrchestrators()) {
     // An orchestrator the owner turned off is not piloting, and a held board is left alone.
@@ -5125,6 +5253,7 @@ function startSession(s: TerminalSession): TerminalSession {
   // The shared root and this role's, seeded if they are not there yet and never overwritten.
   const rootsFor = ensureRoots(s.roleClass ?? null)
 
+  stopRotation(s.id)
   carryConversation(s)
   const resumeId = resumeIdFor(s) ?? codexResumeIdFor(s)
   /*
@@ -5163,6 +5292,7 @@ function startSession(s: TerminalSession): TerminalSession {
      * appears later is a value nothing older can be compared against.
      */
     GARDEN_GENERATION: String(generation),
+    GARDEN_HISTORY_DIR: cardLibraryDir(s) ?? '',
     /*
      * The two roots above this card's own: the shared one and its role's.
      *
@@ -8676,18 +8806,20 @@ function handle(ws: WebSocket, msg: ClientMessage) {
        * is holding, since the answer to an older request must not be taken for the live tail.
        */
       const older = typeof msg.before === 'number'
-      const page = s.transcriptPath
-        ? readChatPage(s.transcriptPath, older ? msg.before! : null)
-        : { turns: [], cursor: 0, atStart: true }
-      send(ws, {
-        t: 'agent.chat',
-        sessionId: s.id,
-        turns: page.turns,
-        cursor: page.cursor,
-        atStart: page.atStart,
-        older,
-        file: s.transcriptPath ?? undefined,
-      })
+      void (s.transcriptPath
+        ? readChatPageAsync(s.transcriptPath, older ? msg.before! : null)
+        : Promise.resolve({ turns: [], cursor: 0, atStart: true })
+      ).then((page) =>
+        send(ws, {
+          t: 'agent.chat',
+          sessionId: s.id,
+          turns: page.turns,
+          cursor: page.cursor,
+          atStart: page.atStart,
+          older,
+          file: s.transcriptPath ?? undefined,
+        }),
+      )
       return
     }
 
@@ -8861,6 +8993,7 @@ ptys.on('exit', ({ sessionId, exitCode, intentional }) => {
   // Whatever it was holding, it is not working on it now. Released before anything else, so a card
   // that crashed cannot leave a file flagged against the next card that needs it.
   releaseClaims(sessionId)
+  queueRotation(sessionId)
   const s = store.getSession(sessionId)
   if (!s) return
   const updated: TerminalSession = {
@@ -10188,11 +10321,27 @@ setTimeout(() => {
 
 // The CLI writes the account file, so Garden watches for it rather than assuming it is told.
 // Signing in to a fresh profile should show up on the tab within a few seconds.
+let profilesBeingRead = false
+let profileReaderFailed = false
 setInterval(() => {
-  const before = JSON.stringify(store.listProfiles().map((p) => p.accountEmail))
-  refreshProfiles()
-  const after = JSON.stringify(store.listProfiles().map((p) => p.accountEmail))
-  if (before !== after) broadcast({ t: 'profiles', profiles: store.listProfiles(), defaultAccount: readAccount(defaultConfigDir()) })
+  if (profilesBeingRead) return
+  profilesBeingRead = true
+  const apply = (reading?: ProfileReading) => {
+    const before = JSON.stringify(store.listProfiles().map((p) => p.accountEmail))
+    refreshProfiles(reading)
+    const after = JSON.stringify(store.listProfiles().map((p) => p.accountEmail))
+    if (before !== after) broadcast({ t: 'profiles', profiles: store.listProfiles(), defaultAccount: readAccount(defaultConfigDir()) })
+  }
+  const asked = { dataDir: DATA_DIR, profiles: store.listProfiles().map((p) => ({ adapterId: p.adapterId, configDir: p.configDir })) }
+  void readProfiles(asked)
+    .then(apply)
+    .catch((err) => {
+      // Accounts must stay correct, so a reader that cannot run falls back to reading here.
+      if (!profileReaderFailed) console.error(`[garden] profile reader failed, reading on the main thread: ${(err as Error).message}`)
+      profileReaderFailed = true
+      try { apply() } catch (e) { console.error(e) }
+    })
+    .finally(() => { profilesBeingRead = false })
 }, 5000)
 // Every project at its real folder before anything else reads a path (canon 29 section 5). Boot only:
 // no card is running yet, so no card is writing a conversation under the folder being left.
@@ -10250,6 +10399,10 @@ http.listen(port, '127.0.0.1', () => {
   }
   if (process.env.GARDEN_HOME) console.log(`[garden] workspace ${DATA_DIR}`)
   revive()
+  // Every card once after a boot, since a restart ends cards without the exit path below. Canon 30.
+  setTimeout(() => {
+    for (const s of store.listSessions()) if (s.kind === 'session' && s.adapterId === 'claude' && s.closedAt === null) queueRotation(s.id)
+  }, 30000).unref?.()
 })
 
 /**
@@ -10419,6 +10572,7 @@ function revive() {
 function shutdown() {
   if (leaving) return
   leaving = true
+  stopRotation()
   ptys.killAll()
   const startedAt = Date.now()
   const poll = setInterval(() => {

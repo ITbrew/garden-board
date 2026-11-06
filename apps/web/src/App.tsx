@@ -11,6 +11,22 @@ import { UndoBar } from './components/UndoBar'
 import { Canvas } from './components/Canvas'
 import { TerminalDock } from './components/TerminalDock'
 
+/** Mounted fresh each time the connection goes, so the clock starts from that moment. Canon 01. */
+function OfflineBanner() {
+  const [long, setLong] = useState(false)
+  useEffect(() => {
+    const t = setTimeout(() => setLong(true), 120_000)
+    return () => clearTimeout(t)
+  }, [])
+  return (
+    <div className="banner banner--offline">
+      {long
+        ? 'The Garden server has not answered for 2 minutes. If it stays like this, close and reopen Garden, which starts the server again if it has stopped.'
+        : 'The Garden server is not answering. It may just be busy and come back by itself, so there is no need to close this window yet. Retrying.'}
+    </div>
+  )
+}
+
 export function App() {
   const connected = useApp((s) => s.connected)
   const lastError = useApp((s) => s.lastError)
@@ -203,9 +219,7 @@ ${
         * that from the outside.
         */}
       {!connected && (
-        <div className="banner banner--offline">
-          Not connected to the Garden server. Cards and terminals are frozen, not stopped. Retrying.
-        </div>
+        <OfflineBanner />
       )}
 
       {/*

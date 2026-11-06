@@ -91,7 +91,7 @@ blackhole = true
 await sleep(30_000)
 
 const afterSilence = await proxyBanner()
-check('a silent socket is noticed and reported', afterSilence.includes('Not connected'), afterSilence || '(no banner)')
+check('a silent socket is noticed and reported', afterSilence.includes('not answering'), afterSilence || '(no banner)')
 
 // And it heals: put the traffic back and the existing backoff reconnect takes it from there.
 blackhole = false
@@ -213,8 +213,15 @@ await board.stop()
 await sleep(3000)
 
 const banner = await bannerText()
-check('the page says it is not connected', banner.includes('Not connected'), banner)
-check('and says the cards are frozen rather than stopped', banner.includes('frozen'), banner)
+check('the page says the server is not answering', banner.includes('not answering'), banner)
+check('and that there is no need to close the window yet', banner.includes('no need to close'), banner)
+if (process.env.GARDEN_SHOT_DIR) await page.screenshot({ path: process.env.GARDEN_SHOT_DIR + '/banner-first.png' })
+
+// Canon 01: after two minutes of silence it stops saying to wait.
+await sleep(120_000)
+const longBanner = await bannerText()
+check('after 2 minutes it says to close and reopen if it stays like this', longBanner.includes('2 minutes') && longBanner.includes('close and reopen'), longBanner)
+if (process.env.GARDEN_SHOT_DIR) await page.screenshot({ path: process.env.GARDEN_SHOT_DIR + '/banner-long.png' })
 
 await browser.close()
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`)

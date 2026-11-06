@@ -13,9 +13,10 @@
  */
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { MAX_TAIL_BYTES, TAIL_BYTES, readChatPage, tailLines } from './transcript.js'
+import { MAX_TAIL_BYTES, TAIL_BYTES, readChatPageAsync, tailLines } from './transcript.js'
 import type {
   AgentEvent,
   ServerMessage,
@@ -946,8 +947,8 @@ export class Ingest {
     if (!session) return
     const path = this.transcriptFor(session)
     if (!path) return
-    try {
-      const st = statSync(path)
+    void (async () => {
+      const st = await stat(path)
       const stamp = `${st.size}:${st.mtimeMs}`
       if (this.chatSeen.get(sessionId) === stamp) return
       this.chatSeen.set(sessionId, stamp)
@@ -957,7 +958,7 @@ export class Ingest {
        * last sixty turns the moment the agent said anything, because this sent sixty turns and
        * nothing to say where they sat.
        */
-      const page = readChatPage(path, null)
+      const page = await readChatPageAsync(path, null)
       this.broadcast({
         t: 'agent.chat',
         sessionId,
@@ -967,10 +968,10 @@ export class Ingest {
         older: false,
         file: path,
       })
-    } catch {
+    })().catch(() => {
       // A transcript that vanished or cannot be read is not worth an error here. The card keeps
       // whatever it already had and says so through its own empty states.
-    }
+    })
   }
 
   /**

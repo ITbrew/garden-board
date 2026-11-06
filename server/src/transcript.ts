@@ -11,6 +11,7 @@
  * nothing else in the app moves.
  */
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
+import { open, stat } from 'node:fs/promises'
 
 export interface TranscriptRender {
   markdown: string
@@ -234,34 +235,8 @@ export function readChatPage(path: string, before: number | null, limit = 60): C
       const lo = Math.max(0, end - window)
       const buf = Buffer.allocUnsafe(end - lo)
       readSync(fd, buf, 0, end - lo, lo)
-
-      // Line starts, as absolute byte offsets, and the lines themselves.
-      const lines: Array<{ off: number; text: string }> = []
-      let start = 0
-      for (let i = 0; i < buf.length; i++) {
-        if (buf[i] !== 0x0a) continue
-        if (i > start) lines.push({ off: lo + start, text: buf.toString('utf8', start, i) })
-        start = i + 1
-      }
-      // A last line with no newline after it, which only the end of the file can produce.
-      if (start < buf.length) lines.push({ off: lo + start, text: buf.toString('utf8', start) })
-      // The first piece began before this read did, unless the read began at the file's start.
-      if (lo > 0) lines.shift()
-
-      // Newest first, a whole line at a time, until there are enough.
-      const kept: Array<ChatTurn & { off: number }> = []
-      let cursor = end
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const turns = turnsFromLine(lines[i].text)
-        cursor = lines[i].off
-        kept.unshift(...turns.map((t) => ({ ...t, off: lines[i].off })))
-        if (kept.length >= limit) break
-      }
-
-      const readAll = lo === 0 && (lines.length === 0 || cursor === lines[0].off)
-      if (kept.length >= limit || lo === 0) {
-        return { turns: kept, cursor: lines.length ? cursor : 0, atStart: readAll }
-      }
+      const page = pageFromBytes(buf, lo, end, limit)
+      if (page) return page
       // Not enough in this much of the file, so read further back and try again.
     }
   } catch {
@@ -269,6 +244,103 @@ export function readChatPage(path: string, before: number | null, limit = 60): C
   } finally {
     closeSync(fd)
   }
+}
+
+/** A page from the bytes ending at `end`, or null when these bytes did not hold enough turns. */
+function pageFromBytes(buf: Buffer, lo: number, end: number, limit: number): ChatPage | null {
+  // Line starts, as absolute byte offsets, and the lines themselves.
+  const lines: Array<{ off: number; text: string }> = []
+  let start = 0
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] !== 0x0a) continue
+    if (i > start) lines.push({ off: lo + start, text: buf.toString('utf8', start, i) })
+    start = i + 1
+  }
+  // A last line with no newline after it, which only the end of the file can produce.
+  if (start < buf.length) lines.push({ off: lo + start, text: buf.toString('utf8', start) })
+  // The first piece began before this read did, unless the read began at the file's start.
+  if (lo > 0) lines.shift()
+
+  // Newest first, a whole line at a time, until there are enough.
+  const kept: Array<ChatTurn & { off: number }> = []
+  let cursor = end
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const turns = turnsFromLine(lines[i].text)
+    cursor = lines[i].off
+    kept.unshift(...turns.map((t) => ({ ...t, off: lines[i].off })))
+    if (kept.length >= limit) break
+  }
+
+  const readAll = lo === 0 && (lines.length === 0 || cursor === lines[0].off)
+  if (kept.length >= limit || lo === 0) {
+    return { turns: kept, cursor: lines.length ? cursor : 0, atStart: readAll }
+  }
+  return null
+}
+
+/** What the async read needs from an open file, so a test can give it a slow one. */
+export interface ChatFile {
+  read(buffer: Buffer, offset: number, length: number, position: number): Promise<unknown>
+  close(): Promise<void>
+}
+export type OpenChatFile = (path: string) => Promise<ChatFile>
+
+async function readChatPageOnce(path: string, before: number | null, limit: number, openFile: OpenChatFile): Promise<ChatPage> {
+  const empty: ChatPage = { turns: [], cursor: 0, atStart: true }
+  if (!path) return empty
+  let file: ChatFile | null = null
+  try {
+    const size = (await stat(path)).size
+    const end = before === null ? size : Math.max(0, Math.min(Math.floor(before), size))
+    if (end === 0) return empty
+    file = await openFile(path)
+    for (let window = PAGE_FIRST_BYTES; ; window *= 2) {
+      const lo = Math.max(0, end - window)
+      const buf = Buffer.allocUnsafe(end - lo)
+      await file.read(buf, 0, end - lo, lo)
+      const page = pageFromBytes(buf, lo, end, limit)
+      if (page) return page
+    }
+  } catch {
+    return empty
+  } finally {
+    await file?.close().catch(() => {})
+  }
+}
+
+/** Reads of one file, in order, with the requests that have not started yet. */
+const chatReadLines = new Map<string, { last: Promise<unknown>; waiting: Map<string, Promise<ChatPage>> }>()
+
+/**
+ * `readChatPage` without holding the server's thread while the disk answers. Canon 01.
+ *
+ * On 2026-11-06 one of these reads took 29.2 s and used 125 ms of processor, and the whole board
+ * stopped for it. The same read normally takes under 60 ms.
+ *
+ * Reads of one file run one at a time, so a later answer is never older than an earlier one and a
+ * stalled disk cannot fill the thread pool. A request identical to one that has not started yet
+ * shares its answer, which is just as fresh.
+ */
+export function readChatPageAsync(path: string, before: number | null, limit = 60, openFile: OpenChatFile = open as unknown as OpenChatFile): Promise<ChatPage> {
+  let line = chatReadLines.get(path)
+  if (!line) {
+    line = { last: Promise.resolve(), waiting: new Map() }
+    chatReadLines.set(path, line)
+  }
+  const reads = line
+  const key = `${before}:${limit}`
+  const queued = reads.waiting.get(key)
+  if (queued) return queued
+  const run = reads.last.then(() => {
+    reads.waiting.delete(key)
+    return readChatPageOnce(path, before, limit, openFile)
+  })
+  reads.waiting.set(key, run)
+  const settled: Promise<unknown> = run.finally(() => {
+    if (reads.last === settled && chatReadLines.get(path) === reads) chatReadLines.delete(path)
+  })
+  reads.last = settled
+  return run
 }
 
 function turnsFrom(lines: string[]): ChatTurn[] {
