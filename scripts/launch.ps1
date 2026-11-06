@@ -160,7 +160,22 @@ trap {
     After that, a launch that is not elevated while the choice says it should be (an old shortcut, a
     run by hand) starts the task and leaves, so every way in ends up the same.
 #>
+# Task Scheduler can inherit an environment from before the data folder was configured.
+# Recover persisted settings before reading setup or starting children; explicit process
+# overrides still win so isolated instances keep their own workspace.
+function Initialize-GardenDataEnvironment {
+    if ($env:GARDEN_HOME) { return }
+    foreach ($scope in 'User', 'Machine') {
+        $value = [Environment]::GetEnvironmentVariable('GARDEN_HOME', $scope)
+        if ($value) {
+            $env:GARDEN_HOME = $value
+            break
+        }
+    }
+}
+Initialize-GardenDataEnvironment
 $DataDir = if ($env:GARDEN_HOME) { $env:GARDEN_HOME } else { Join-Path $HOME '.garden' }
+Write-Log ("DATA  workspace $DataDir")
 $SetupFile = Join-Path $DataDir 'setup.json'
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $Setup = $null
