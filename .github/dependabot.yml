@@ -1,0 +1,30 @@
+version: 2
+
+# Weekly, grouped, and small on purpose.
+#
+# Dependabot's default is one pull request per dependency, which on a tree this size is a stream of
+# them and gets muted within a fortnight. Grouped into two, patches and minors together and majors
+# separately, it is one thing to look at on a Monday. A major deserves its own pull request because
+# it is the only one where reading the changelog is not optional.
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      routine:
+        update-types: [minor, patch]
+    # node-pty is pinned deliberately: it works here only because of its win32-x64 prebuild and the
+    # bundled ConPTY, and CLAUDE.md records what broke last time that changed. Upgrading it is a
+    # decision with a test to run, not something to accept from a green tick.
+    ignore:
+      - dependency-name: node-pty
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

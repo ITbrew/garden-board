@@ -1,0 +1,266 @@
+/**
+ * Start Garden's server again once the one that asked has let go of its port.
+ *
+ * A process cannot restart itself. It can spawn something that outlives it, and that is this: it is
+ * launched detached by the server, waits for the port to actually close, starts the replacement, and
+ * exits. Nothing else on the board depends on it, and if it fails the only consequence is that the
+ * server stays down until the owner starts it himself, which is the same position he was in before
+ * there was a button.
+ *
+ * Waiting on the PORT rather than on a delay, because a fixed sleep is a guess about how long the
+ * old server takes to flush every card's scrollback and tear down ten PTYs, and guessing wrong hands
+ * the replacement an address already in use. A port that refuses a connection is the thing actually
+ * being waited for.
+ *
+ * The page half goes with it when `--web-port` says which one this server belongs to. Restarting the
+ * backend alone is what left the owner looking at the old build with `builds differ` beside it, and
+ * canon 22 has the reasoning: no session lives in the page half, so replacing it costs seconds and
+ * no state, while leaving it produces the exact warning the button was pressed to clear. Without
+ * `--web-port` nothing here goes near a page half, which is what keeps an instance a test started
+ * away from the owner's real one.
+ *
+ *   node garden-restart.mjs --port 5178 --cwd C:/Garden --exec <path> --args <json array>
+ *                           [--web-port 5177] [--pid <old server pid>]
+ */
+import { execFileSync, spawn } from 'node:child_process'
+import { connect } from 'node:net'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const argv = process.argv.slice(2)
+const arg = (name) => {
+  const i = argv.indexOf(`--${name}`)
+  return i >= 0 ? argv[i + 1] : undefined
+}
+
+const port = Number(arg('port'))
+// Absent means there is no page half to replace, which is the answer for every server that was not
+// started by the launcher. It is never defaulted to 5177: that default would let a test instance
+// stop the owner's real Vite.
+const webPort = Number(arg('web-port')) || 0
+const cwd = arg('cwd') || process.cwd()
+
+/**
+ * Where `npm run dev:web` actually resolves, which is NOT always the server's own directory.
+ *
+ * `--cwd` is the old server's `process.cwd()`. Started through `npm run dev:server`, that is the
+ * `@garden/server` workspace, and that workspace has no `dev:web` script: only the repo root does.
+ * So the page half was killed and its replacement died instantly on `Missing script: "dev:web"`,
+ * with `stdio: 'ignore'` swallowing the reason. The board then fell back to the server serving
+ * `apps/web/dist`, which on the owner's machine was a week-old bundle, so a restart silently
+ * returned him to an old UI and every client fix since looked like it had never landed.
+ *
+ * Measured, not guessed: `npm run dev:web` in `E:\Garden\server` exits with
+ * `Missing script: "dev:web"`.
+ *
+ * So pick the first directory that really declares the script, rather than assuming either one.
+ */
+function dirDeclaring(script, candidates) {
+  for (const dir of candidates) {
+    if (!dir) continue
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+      if (pkg?.scripts?.[script]) return dir
+    } catch {
+      // No package.json, or an unreadable one. Not this directory, and not a reason to stop.
+    }
+  }
+  return null
+}
+
+/** The repo root, from this file's own location: <root>/server/bin/garden-restart.mjs. */
+const selfRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const webCwd = dirDeclaring('dev:web', [cwd, selfRoot])
+// The old server's own pid, for the case where it will not leave. Absent means nothing is ever
+// force-killed here: the helper waits on the port and gives up, which is what it always did.
+const oldPid = Number(arg('pid')) || 0
+const exec = arg('exec')
+let args = []
+try {
+  args = JSON.parse(arg('args') || '[]')
+} catch {
+  // A malformed list is a reason to do nothing rather than to start something unexpected.
+  process.exit(1)
+}
+if (!port || !exec) process.exit(1)
+
+/** True while something is still listening, which means the old process has not finished. */
+const listening = (p) =>
+  new Promise((done) => {
+    const probe = connect({ port: p, host: '127.0.0.1' })
+    probe.setTimeout(800)
+    probe.on('connect', () => {
+      probe.destroy()
+      done(true)
+    })
+    probe.on('timeout', () => {
+      probe.destroy()
+      done(true)
+    })
+    probe.on('error', () => done(false))
+  })
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/*
+ * Bounded, because waiting forever for a port that never frees would leave a stray process running
+ * on the owner's machine with nothing to show for it. Thirty seconds is far past what a clean
+ * shutdown takes and short enough to give up honestly.
+ */
+const deadline = Date.now() + 30_000
+while (Date.now() < deadline) {
+  if (!(await listening(port))) break
+  await sleep(250)
+}
+/*
+ * The wait ran out and the port is still held. On 2026-09-11 that was the owner's board: the old
+ * backend stopped in native teardown after killing its one live ConPTY, still listening, answering
+ * nothing, for hours. Exiting here, which is what this did, leaves that corpse holding the port and
+ * the owner with a window that cannot connect and a shortcut that thinks the backend is fine.
+ *
+ * So when the server said which pid it is, end it by force and wait once more. Only that pid, and
+ * only after the polite wait failed: a backend that shuts down cleanly is never touched by this.
+ */
+if ((await listening(port)) && oldPid && oldPid !== process.pid) {
+  try {
+    process.kill(oldPid, 'SIGKILL')
+  } catch {
+    // Already gone, in which case the port is about to free on its own.
+  }
+  const hardDeadline = Date.now() + 10_000
+  while (Date.now() < hardDeadline) {
+    if (!(await listening(port))) break
+    await sleep(250)
+  }
+}
+if (await listening(port)) process.exit(1)
+
+/*
+ * Detached and with its handles let go, so this helper exiting cannot take the new server with it.
+ *
+ * `windowsHide` matters as much as `detached` here, and for the opposite reason. Detached on Windows
+ * means the child gets a console of its own, and a console of its own is a black window that appears
+ * on the owner's screen and stays there for as long as Garden runs. The launcher starts both halves
+ * with `-WindowStyle Hidden` for exactly that reason; a restart that does not match it hands him a
+ * window he never had before and cannot close without stopping the server. He put it plainly:
+ * "the listeners keep popping up on my screen as well. i dont watn it to do that".
+ */
+const child = spawn(exec, args, { cwd, detached: true, stdio: 'ignore', windowsHide: true, env: process.env })
+child.unref()
+
+/*
+ * The page half, after the backend and never before it, so nothing here delays the board coming
+ * back. The page reconnects on its own either way: Vite's client reloads the window when its server
+ * returns, and the board's socket badge covers the seconds in between.
+ */
+if (webPort) await replacePageHalf()
+
+async function replacePageHalf() {
+  /*
+   * Ensure it is running, not only replace one that is. This used to return when nothing was
+   * listening, so a restart after Vite had died brought the backend back and left the page dead
+   * until the owner relaunched: "it should be a one shot for vite/garden reset. not 2 step process
+   * like it has been". A webPort is only ever given by the launcher, so a page half here is one he
+   * asked for. Canon 22 revision 9.
+   */
+
+  /*
+   * Before killing anything, not after. Checked here because the kill is the irreversible half:
+   * a restart that stops the page half and then cannot start it again leaves the owner on whatever
+   * stale `dist` the backend happens to serve, silently. If no directory declares `dev:web`, the
+   * running page half is the best thing available and is left alone.
+   */
+  if (!webCwd) return
+
+  const pids = holdersOf(webPort)
+  for (const pid of pids) {
+    try {
+      process.kill(pid)
+    } catch {
+      // Already gone, or not ours to stop. Either way the wait below is the thing that decides.
+    }
+  }
+
+  // Vite is strictPort, so a replacement started while the old one still holds the port exits
+  // instead of moving aside, silently. Waiting on the port is what makes the start meaningful.
+  const webDeadline = Date.now() + 15_000
+  while (Date.now() < webDeadline) {
+    if (!(await listening(webPort))) break
+    await sleep(250)
+  }
+  if (await listening(webPort)) return
+
+  /*
+   * Started the way the launcher starts it, through npm, so there is one definition of what the page
+   * half is. Hidden and with its output dropped: a console here would be a window the owner did not
+   * open, and a console Garden writes to is how the board froze twice (see scripts/launch.ps1).
+   *
+   * GARDEN_WEB_PORT is what makes the start as targeted as the kill. `npm run dev:web` used to bind
+   * whatever apps/web/vite.config.ts said, which was the literal 5177, so this function would stop a
+   * page half on the port it was given and then raise one on the owner's. That is not a theory: on
+   * 2026-09-18 a suite test on the other PC did exactly this and put a second Vite on 5177 while he
+   * was working. Replacing a page half on port N now means starting one on port N.
+   */
+  const webEnv = { ...process.env, GARDEN_WEB_PORT: String(webPort) }
+  /*
+   * Vite itself, started by node, with no `cmd.exe` anywhere in the chain. On a machine whose default
+   * console host is Windows Terminal, a `cmd.exe` opens a visible terminal window whatever
+   * `windowsHide` says, and it sat on the owner's desktop for as long as Garden ran: "can u make the
+   * vite server windows run in the background as well". Measured on a spare port: `cmd.exe /c npm run
+   * dev:web` and npm's own script under node each added a Windows Terminal console; this added none
+   * and served the page. The backend above never had the problem because its chain has no cmd in it.
+   * Canon 22 revision 8. The npm route below stays as the fallback for a checkout laid out otherwise.
+   */
+  const viteBin = join(webCwd, 'node_modules', 'vite', 'bin', 'vite.js')
+  const webDir = join(webCwd, 'apps', 'web')
+  if (existsSync(viteBin) && existsSync(join(webDir, 'vite.config.ts'))) {
+    const web = spawn(process.execPath, [viteBin], {
+      cwd: webDir,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: webEnv,
+    })
+    web.unref()
+    return
+  }
+  const web =
+    process.platform === 'win32'
+      ? spawn('cmd.exe', ['/c', 'npm run dev:web'], {
+          cwd: webCwd,
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: webEnv,
+        })
+      : spawn('npm', ['run', 'dev:web'], { cwd: webCwd, detached: true, stdio: 'ignore', windowsHide: true, env: webEnv })
+  web.unref()
+}
+
+/**
+ * The process ids listening on a port.
+ *
+ * `netstat` rather than a PowerShell cmdlet because this runs detached with no console and needs no
+ * module: the answer is one line of text. Anything unreadable is an empty list, which leaves the
+ * port alone, which is the safe direction for a function whose job is to kill things.
+ */
+function holdersOf(p) {
+  if (process.platform !== 'win32') return []
+  let out = ''
+  try {
+    out = execFileSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8', timeout: 10_000 })
+  } catch {
+    return []
+  }
+  const found = new Set()
+  for (const line of out.split(/\r?\n/)) {
+    const parts = line.trim().split(/\s+/)
+    // TCP  127.0.0.1:5177  0.0.0.0:0  LISTENING  12345
+    if (parts.length < 5 || parts[3] !== 'LISTENING') continue
+    if (!parts[1].endsWith(`:${p}`)) continue
+    const pid = Number(parts[4])
+    if (pid > 0 && pid !== process.pid) found.add(pid)
+  }
+  return [...found]
+}
