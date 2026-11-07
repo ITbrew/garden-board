@@ -550,6 +550,9 @@ export class Store {
         // A board whose loops table predates the count comes back at zero rather than at null, so
         // the panel never has to decide what a missing count means.
         runs: 'INTEGER NOT NULL DEFAULT 0',
+        // Canon 25. An older loop follows nothing, and was stopped or started by hand.
+        followsRing: 'INTEGER NOT NULL DEFAULT 0',
+        stoppedBy: 'TEXT',
       },
       limits: {
         /*
@@ -963,6 +966,8 @@ export class Store {
       lastFiredAt: r.lastFiredAt ?? null,
       lastOutcome: r.lastOutcome ?? null,
       runs: r.runs ?? 0,
+      followsRing: !!r.followsRing,
+      stoppedBy: r.stoppedBy ?? null,
       createdAt: r.createdAt,
     }))
   }
@@ -973,12 +978,12 @@ export class Store {
 
   setLoop(loop: CardLoop) {
     this.db.prepare(`
-      INSERT INTO loops (id, projectId, sessionId, prompt, minutes, enabled, lastFiredAt, lastOutcome, runs, createdAt)
-      VALUES (@id, @projectId, @sessionId, @prompt, @minutes, @enabled, @lastFiredAt, @lastOutcome, @runs, @createdAt)
+      INSERT INTO loops (id, projectId, sessionId, prompt, minutes, enabled, lastFiredAt, lastOutcome, runs, followsRing, stoppedBy, createdAt)
+      VALUES (@id, @projectId, @sessionId, @prompt, @minutes, @enabled, @lastFiredAt, @lastOutcome, @runs, @followsRing, @stoppedBy, @createdAt)
       ON CONFLICT(id) DO UPDATE SET
         sessionId=@sessionId, prompt=@prompt, minutes=@minutes, enabled=@enabled,
-        lastFiredAt=@lastFiredAt, lastOutcome=@lastOutcome
-    `).run({ ...loop, enabled: loop.enabled ? 1 : 0, runs: loop.runs ?? 0 })
+        lastFiredAt=@lastFiredAt, lastOutcome=@lastOutcome, followsRing=@followsRing, stoppedBy=@stoppedBy
+    `).run({ ...loop, enabled: loop.enabled ? 1 : 0, runs: loop.runs ?? 0, followsRing: loop.followsRing ? 1 : 0, stoppedBy: loop.stoppedBy ?? null })
   }
 
   /*

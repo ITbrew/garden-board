@@ -189,7 +189,7 @@ Ask the owner a question only when the answer changes what happens next. One que
 two to four short options, and say which you recommend and why.
 
 You keep \`TODO.md\`, the project's list. Delegate an item by ending its line with \`@Card title\`, then
-start that card's loop.
+start that card's loop. Keep it true as work moves: it draws the tab's goal ring (skill \`goal-ring\`).
 `,
   manager: `# Manager
 
@@ -385,6 +385,11 @@ Delegate in small pieces. A card holding nine items and a fifteen-minute loop wi
 life being asked to check in on work it has not finished, and every one of those is a turn you paid
 for. Two or three open items per card is the shape that works.
 
+## Keeping the goal ring current
+
+The project's tab shows one goal ring, drawn from this file, and keeping it true is your job as work
+moves, without being asked. How to write goals, sub-goals and their exits is in the skill \`goal-ring\`.
+
 ## What none of this is
 
 It is not a task contract. Task ids, owners, verifiers and the states in canon 20 are a different
@@ -516,6 +521,8 @@ function skillSources(hirerDir: string | null, projectPath: string | null): stri
   if (hirerDir) dirs.push(join(hirerDir, 'skills'))
   if (projectPath) dirs.push(join(projectPath, '.claude', 'skills'))
   dirs.push(join(homedir(), '.claude', 'skills'))
+  // Last, the ones Garden ships, so an orchestrator on any project gets the skills its role names.
+  dirs.push(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.claude', 'skills'))
   return dirs
 }
 

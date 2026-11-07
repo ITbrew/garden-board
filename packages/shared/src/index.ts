@@ -1183,6 +1183,8 @@ export type ClientMessage =
   | { t: 'channel.setBox'; channelId: string; width: number; height: number }
   | { t: 'channel.setFontSize'; channelId: string; fontSize: number | null }
   | { t: 'channel.delete'; channelId: string }
+  | { t: 'goal.read'; projectId: string }
+  | { t: 'goal.create'; projectId: string }
   | { t: 'doc.read'; cardId: string }
   | { t: 'doc.save'; cardId: string; content: string; baseMtime?: number }
   | { t: 'doc.close'; cardId: string }
@@ -1308,9 +1310,11 @@ export type ClientMessage =
   | {
       t: 'loop.set'
       projectId: string
-      loop: { id?: string; sessionId: string; prompt: string; minutes: number; enabled: boolean }
+      loop: { id?: string; sessionId: string; prompt: string; minutes: number; enabled: boolean; followsRing?: boolean }
     }
   | { t: 'loop.delete'; projectId: string; id: string }
+  /** The ring's right-click menu. Canon 25. The owner's alone. */
+  | { t: 'ring.control'; projectId: string; op: 'start' | 'pause' | 'disable' }
   | { t: 'limits.get'; projectId: string }
   | { t: 'limits.set'; projectId: string; limits: BoardLimits }
   /**
@@ -1522,6 +1526,7 @@ export type ServerMessage =
   | { t: 'doc.added'; card: DocCard }
   | { t: 'doc.updated'; card: DocCard }
   | { t: 'doc.removed'; cardId: string }
+  | { t: 'goal.text'; projectId: string; text: string | null }
   | { t: 'doc.content'; cardId: string; content: string; mtime?: number; error?: string }
   | {
       t: 'context.list'
@@ -1725,6 +1730,8 @@ export const ROLE_SKILLS: Record<string, string[]> = {
     'canon-library',
     'card-roots',
     'hiring-a-card',
+    'goal-ring',
+    'running-a-tab',
     'double-blind-review',
     'exit-interview',
     'session-claims',
@@ -1988,6 +1995,10 @@ export interface CardLoop {
    * screen, and a count of intentions would just be the clock said back to him.
    */
   runs: number
+  /** Runs while the tab's ring has goals left and closes when it is full. Canon 25. */
+  followsRing: boolean
+  /** Why a stopped loop stopped: by hand, a full ring, or passes that changed nothing. */
+  stoppedBy: 'owner' | 'ring' | 'stuck' | 'disabled' | null
   createdAt: number
 }
 

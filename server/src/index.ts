@@ -18,6 +18,7 @@ import {
   type ServerMessage,
   type Project,
   type TerminalSession,
+  type CardLoop,
   type DocCard,
   type Channel,
   type Wire,
@@ -41,9 +42,11 @@ import { scanContext } from './context-web.js'
 import { ensureMemory, memoryDirFor, writeCardBrief } from './memory.js'
 import { Watchdog } from './watchdog.js'
 import { boardMarkdown, openTodos, readPrompt, since } from './pilot.js'
+import { parseGoal } from '@garden/shared/goals'
+import { ringLoopStep } from './ring-loop.js'
 import { clearUnreadMarker, mailDirFor, postMessage, recordSent, unreadInline, writePeers, writePowers, writeUnreadMarker, type Peer } from './mail.js'
 import { hasSubstance, historyDirFor, stamp, writeAgentHistory, writeHistory } from './history.js'
-import { writeFile as writeFilePromise } from 'node:fs/promises'
+import { readFile as readFilePromise, writeFile as writeFilePromise } from 'node:fs/promises'
 import { readChat, readChatPageAsync, renderTranscript } from './transcript.js'
 import { readProfiles, type ProfileReading } from './profile-reader.js'
 import { reachAgent } from './agent-reach.js'
@@ -160,9 +163,8 @@ process.env.GARDEN_HOOK_SETTINGS = hookSettingsFile
 // A process cannot be re-parented across an app restart, so anything the database still thinks
 // is running is stale. Say so rather than showing a node that looks alive.
 //
-// It hands back the cards that were live a moment ago. They stay off: nothing starts at boot, the
-// owner turns on an orchestrator and it turns on the rest (see `revive` at the bottom of this file,
-// canon 03 revision 18).
+// It hands back the cards that were live a moment ago. Only the orchestrators among them come back,
+// and each decides what else to start (see `revive` at the bottom of this file, canon 03 revision 20).
 const wereLive = store.markAllExitedOnBoot()
 
 const pruned = store.pruneOrphanedBindings()
@@ -1456,6 +1458,7 @@ const GUEST_READS = new Set<string>([
   'session.scrollback',
   'doc.list',
   'doc.read',
+  'goal.read',
   'channel.read',
   'work.list',
   'pipeline.get',
@@ -1540,8 +1543,15 @@ function socketMaySend(ws: WebSocket, msg: ClientMessage): { ok: true } | { ok: 
    * this door was written and fell through its closing `return { ok: true }`, which is the same
    * failure the guest allowlist above avoids by being an allowlist. Canon 25.
    */
+  if (t === 'ring.control') {
+    return { ok: false, reason: "the ring's menu is the owner's. To run this tab's loop, use garden-loop.mjs." }
+  }
   if (t === 'loop.set' || t === 'loop.delete') {
-    const asked = msg as { loop?: { sessionId?: string }; id?: string }
+    const asked = msg as { loop?: { id?: string; sessionId?: string; enabled?: boolean }; id?: string }
+    // Canon 25: the owner turned this tab's loop off, and only the owner turns it back on.
+    if (t === 'loop.set' && asked.loop?.enabled && store.getLoop(String(asked.loop.id ?? ''))?.stoppedBy === 'disabled') {
+      return { ok: false, reason: 'the owner disabled this loop, so only the owner can start it. Mail still works.' }
+    }
     const target =
       t === 'loop.set'
         ? asked.loop?.sessionId ?? null
@@ -3350,7 +3360,24 @@ function noteOwnerInput(sessionId: string, data: string): void {
   logInput(sessionId, 'page', data)
   if (data.replace(TERMINAL_REPLY, '').replace(/[\r\n]/g, '').length > 0) {
     ownerTypedAt.set(sessionId, Date.now())
+    ownerDraftAt.set(sessionId, Date.now())
   }
+  // Enter or Ctrl+C ends the draft. A paste holds newlines but ends in its closing bracket, so it does not.
+  if (/[\r\x03]$/.test(data)) ownerDraftAt.delete(sessionId)
+}
+
+/**
+ * Whether the owner is part way through a line in this card's composer.
+ *
+ * An automatic line typed now joins their text and its Enter submits both, which sent "how do i get"
+ * and "i still want orchestrator" on 2026-11-06. Held until they send it, or for ten minutes after
+ * their last key, because text can be cleared without Garden seeing it. Canon 25.
+ */
+const ownerDraftAt = new Map<string, number>()
+const OWNER_DRAFT_HOLD_MS = 10 * 60_000
+function ownerDrafting(sessionId: string): boolean {
+  const at = ownerDraftAt.get(sessionId)
+  return at !== undefined && Date.now() - at < OWNER_DRAFT_HOLD_MS
 }
 
 /*
@@ -4018,6 +4045,7 @@ function flushMailWake(sessionId: string): WakeOutcome {
   // An owner line typed and not yet submitted is his; the notice waits rather than joining it.
   const theirs = wakeUnsent.get(sessionId)
   if (theirs && !theirs.mail && theirs.generation === s.generation) return 'queued'
+  if (ownerDrafting(sessionId)) return 'queued'
 
   // It is up, so the one-shot start guard has done its job. Released here rather than on exit so a
   // card that is woken, stopped and written to again can be woken again.
@@ -4437,6 +4465,25 @@ function orchestratorFor(s: TerminalSession): TerminalSession | undefined {
   return mine.find((o) => ptys.isLive(o.id)) ?? mine[0]
 }
 
+/**
+ * The tab's list, for its goal ring (canon 26): `TODO.md` at the project root, or failing that one a
+ * document card points at. Off the server thread, because it is asked every few seconds and a slow
+ * disk must not stop the board (canon 01).
+ */
+async function readGoalText(projectId: string, projectPath: string): Promise<string | null> {
+  const paths = ['TODO.md']
+  const held = store.listDocs().find((d) => d.projectId === projectId && !d.external && /(^|\/)todo\.md$/i.test(d.relPath))
+  if (held) paths.push(held.relPath)
+  for (const relPath of paths) {
+    try {
+      return await readFilePromise(safeJoin(projectPath, relPath), 'utf8')
+    } catch {
+      // Not this one.
+    }
+  }
+  return null
+}
+
 function pilotTodos(projectId: string): string[] {
   const p = store.getProject(projectId)
   if (!p) return []
@@ -4603,6 +4650,8 @@ setInterval(() => {
       store.listTasks(orch.projectId).some((t) => pilotLiveTask(t, now)) ||
       pilotTodos(orch.projectId).length > 0 ||
       pilotWorkers(orch.projectId).some((s) => s.status === 'working')
+    // A tab with a loop following its ring has that for its rhythm instead (canon 28).
+    if (store.listLoops(orch.projectId).some((l) => l.followsRing)) continue
     if (openWork && orch.status !== 'working' && !store.pendingMailFor(orch.id) && now - last >= PILOT_CHECKIN_MS) {
       if (!pilotLastWake.has(orch.id)) {
         // The first sweep after a start only starts the clock, so a restart is not a burst of check-ins.
@@ -6106,6 +6155,24 @@ function handle(ws: WebSocket, msg: ClientMessage) {
         }
       }
       broadcast({ t: 'channel.removed', channelId: channel.id })
+      return
+    }
+
+    case 'goal.read': {
+      const project = store.getProject(msg.projectId)
+      if (!project) return fail(ws, 'unknown project', msg.t)
+      void readGoalText(project.id, project.path).then((text) => send(ws, { t: 'goal.text', projectId: project.id, text }))
+      return
+    }
+
+    case 'goal.create': {
+      const project = store.getProject(msg.projectId)
+      if (!project) return fail(ws, 'unknown project', msg.t)
+      // The `wx` flag: a list that is already there is never overwritten.
+      void writeFilePromise(join(project.path, 'TODO.md'), '# TO DO\n\n## Now: ' + project.name + '\n', { encoding: 'utf8', flag: 'wx' })
+        .catch(() => undefined)
+        .then(() => readGoalText(project.id, project.path))
+        .then((text) => broadcast({ t: 'goal.text', projectId: project.id, text }))
       return
     }
 
@@ -8405,11 +8472,52 @@ function handle(ws: WebSocket, msg: ClientMessage) {
         // prompt or interval leaves the count where it was: it is the history of the card being
         // typed into, not of this particular wording.
         runs: existing?.runs ?? 0,
+        followsRing: l.followsRing ?? existing?.followsRing ?? false,
+        // Set here means set by hand. The loop tick writes 'ring' and 'stuck' itself.
+        stoppedBy: l.enabled ? null : existing && !existing.enabled ? existing.stoppedBy ?? 'owner' : 'owner',
         createdAt: existing?.createdAt ?? Date.now(),
       })
+      ringFires.delete(existing?.id ?? '')
       // Started, so do not wait up to twenty seconds for the next tick to notice.
       if (l.enabled && !(existing && existing.enabled)) loopTick()
       return broadcast({ t: 'loops', projectId: project.id, loops: store.listLoops(project.id) })
+    }
+    case 'ring.control': {
+      const project = store.getProject(msg.projectId)
+      if (!project) return fail(ws, 'unknown project', msg.t)
+      const orch = store.listSessions().find((s) => s.projectId === project.id && s.roleClass === 'orchestrator' && s.closedAt === null && s.kind === 'session')
+      const onBoard = store.listLoops(project.id)
+      const existing = onBoard.find((l) => l.followsRing) ?? onBoard.find((l) => l.sessionId === orch?.id)
+      if (!existing && !orch) return fail(ws, 'this tab has no orchestrator to run a loop', msg.t)
+      const loop: CardLoop = existing ?? {
+        id: randomUUID(),
+        projectId: project.id,
+        sessionId: orch!.id,
+        prompt: RING_LOOP_PROMPT,
+        minutes: 10,
+        enabled: false,
+        lastFiredAt: null,
+        lastOutcome: null,
+        runs: 0,
+        followsRing: true,
+        stoppedBy: null,
+        createdAt: Date.now(),
+      }
+      const start = msg.op === 'start'
+      ringFires.delete(loop.id)
+      if (start) ringClosing.delete(project.id)
+      store.setLoop({
+        ...loop,
+        followsRing: true,
+        enabled: start,
+        lastFiredAt: start ? null : loop.lastFiredAt,
+        stoppedBy: start ? null : msg.op === 'disable' ? 'disabled' : 'owner',
+        lastOutcome: start ? loop.lastOutcome : msg.op === 'disable' ? 'disabled: cards still do mail' : 'paused by hand',
+      })
+      // Shown before the tick, which may spend a moment starting the card.
+      broadcast({ t: 'loops', projectId: project.id, loops: store.listLoops(project.id) })
+      if (start) loopTick()
+      return
     }
     case 'loop.delete': {
       const project = store.getProject(msg.projectId)
@@ -10229,16 +10337,117 @@ setInterval(() => {
  * "every fifteen minutes" means the first one is in fifteen minutes. That reasoning is about the
  * clock and his is about the card, and the card is the point.
  */
+/** The tab's ring as its `TODO.md` draws it right now, counted by the ring's own reading (canon 26). */
+function ringOf(projectId: string): { left: number; total: number; mtime: number } {
+  const project = store.getProject(projectId)
+  if (!project) return { left: 0, total: 0, mtime: 0 }
+  try {
+    const file = join(project.path, 'TODO.md')
+    const goal = parseGoal(readFileSync(file, 'utf8'), [])
+    const total = goal?.steps.length ?? 0
+    return { left: total - (goal?.done ?? 0), total, mtime: statSync(file).mtimeMs }
+  } catch {
+    return { left: 0, total: 0, mtime: 0 }
+  }
+}
+
+/** What a ring loop started from the ring's menu types, until its orchestrator writes its own. */
+const RING_LOOP_PROMPT =
+  "Ring loop pass. Read this tab's TODO.md and your BOARD.md. Move one open line: hand it to a card and start that card, " +
+  'answer a card that is waiting, check finished work and tick what you can show, or do the line yourself. Keep the ring true as ' +
+  'you go. Do not report what the ring already shows. If no open line can move without the owner, say that in one line of ' +
+  'BOARD-LOG.md and stop this pass. Skill: running-a-tab.'
+
+/** Each ring loop's last sight of its list and the prompts typed since it changed. Starts again after a restart. */
+const ringFires = new Map<string, { mtime: number; fires: number }>()
+/** Tabs whose loop has closed, whose cards are turning off as each comes free, and since when. */
+const ringClosing = new Map<string, number>()
+const RING_CLOSE_LIMIT_MS = 30 * 60_000
+const RING_CARD_QUIET_MS = 60_000
+const RING_OWNER_QUIET_MS = 10 * 60_000
+
+/**
+ * Turn a closed tab's cards off, workers first and the orchestrator once none are left. One that is
+ * busy, holding mail or recently typed to is passed over until it is free. Past the limit the rest stay
+ * on, so a card someone later turned on by hand is not taken away from them.
+ */
+function ringCloseCards(now: number): void {
+  for (const [projectId, since] of ringClosing) {
+    if (now - since > RING_CLOSE_LIMIT_MS) {
+      ringClosing.delete(projectId)
+      continue
+    }
+    const live = store
+      .listSessions()
+      .filter((s) => s.projectId === projectId && s.kind === 'session' && s.closedAt === null && s.title !== 'Keeper' && ptys.isLive(s.id))
+    if (live.length === 0) {
+      ringClosing.delete(projectId)
+      continue
+    }
+    const workers = live.filter((s) => s.roleClass !== 'orchestrator')
+    for (const s of workers.length ? workers : live) {
+      if (s.status !== 'idle' && s.status !== 'done') continue
+      if (now - (s.statusSince ?? 0) < RING_CARD_QUIET_MS) continue
+      if (store.pendingMailFor(s.id) || ownerDrafting(s.id)) continue
+      if (now - (ownerTypedAt.get(s.id) ?? 0) < RING_OWNER_QUIET_MS) continue
+      ptys.kill(s.id)
+    }
+  }
+}
+
+/** Starts, closes or pauses a loop that follows the ring. Returns the ring for the firing below. */
+function ringLoopTurn(loop: CardLoop, now: number, touched: Set<string>): { left: number; total: number; mtime: number } | null {
+  const ring = ringOf(loop.projectId)
+  const seen = ringFires.get(loop.id)
+  const stopWith = (stoppedBy: 'ring' | 'stuck', lastOutcome: string) => {
+    store.setLoop({ ...loop, enabled: false, stoppedBy, lastOutcome })
+    ringClosing.set(loop.projectId, now)
+    touched.add(loop.projectId)
+  }
+  const step = ringLoopStep({
+    enabled: loop.enabled,
+    stoppedBy: loop.stoppedBy,
+    left: ring.left,
+    total: ring.total,
+    listChanged: seen !== undefined && seen.mtime !== ring.mtime,
+    firesUnchanged: seen && seen.mtime === ring.mtime ? seen.fires : 0,
+    anyWorking: store.listSessions().some((s) => s.projectId === loop.projectId && s.closedAt === null && s.status === 'working'),
+  })
+  if (step === 'finish') stopWith('ring', ring.total ? `finished: ${ring.total} of ${ring.total} done` : 'finished: no goals on the ring')
+  else if (step === 'pause') stopWith('stuck', `paused: nothing moved in three passes, ${ring.left} of ${ring.total} left`)
+  else if (step === 'resume') {
+    ringFires.delete(loop.id)
+    ringClosing.delete(loop.projectId)
+    store.setLoop({ ...loop, enabled: true, stoppedBy: null, lastFiredAt: null, lastOutcome: `${ring.left} of ${ring.total} left` })
+    touched.add(loop.projectId)
+  }
+  return step === 'carry-on' ? ring : null
+}
+
 function loopTick() {
   const now = Date.now()
   const touched = new Set<string>()
+  ringCloseCards(now)
   for (const loop of store.listLoops()) {
-    if (!loop.enabled) continue
+    // A held board holds its loops, whichever way they would have gone.
+    if (loop.followsRing && pilotHeld(loop.projectId)) continue
+    const ring = loop.followsRing ? ringLoopTurn(loop, now, touched) : null
+    if (!loop.enabled || (loop.followsRing && !ring)) continue
     if (loop.lastFiredAt !== null && now - loop.lastFiredAt < loop.minutes * 60_000) continue
     const s = store.getSession(loop.sessionId)
+    // A ring loop whose card is off wakes it with the prompt as mail, under the same ceiling as any wake.
+    if (ring && s && s.closedAt === null && s.kind === 'session' && !ptys.isLive(s.id)) {
+      fileMail(s, 'Garden', loop.prompt, { kind: 'work', taskId: 'ring-loop' })
+      wakeForMail(s.id)
+      ringFires.set(loop.id, { mtime: ring.mtime, fires: 0 })
+      store.markLoop(loop.id, now, `typed: woke the card, ${ring.left} of ${ring.total} left`)
+      touched.add(loop.projectId)
+      continue
+    }
     const held = !s ? 'held: card gone'
       : s.closedAt !== null ? 'held: card closed'
       : s.status !== 'idle' ? `held: card ${s.status}`
+      : ownerDrafting(s.id) ? 'held: owner typing'
       : null
     if (held) {
       if (loop.lastOutcome !== held) {
@@ -10253,7 +10462,11 @@ function loopTick() {
       continue
     }
     writeLater(loop.sessionId, s!.generation, '\r')
-    store.markLoop(loop.id, now, 'typed')
+    if (ring) {
+      const was = ringFires.get(loop.id)
+      ringFires.set(loop.id, { mtime: ring.mtime, fires: was && was.mtime === ring.mtime ? was.fires + 1 : 1 })
+    }
+    store.markLoop(loop.id, now, ring ? `typed: ${ring.left} of ${ring.total} left` : 'typed')
     touched.add(loop.projectId)
   }
   for (const projectId of touched) {
@@ -10461,15 +10674,29 @@ http.listen(port, '127.0.0.1', () => {
  */
 const WORTH_REVIVING = new Set(['working', 'starting', 'needs-input', 'idle'])
 
+/**
+ * What a returning orchestrator is told, so it can decide what to start. The states are as they were
+ * when the board went down, because every card is off now. Canon 03 revision 20.
+ */
+function backAfterRestartNote(orch: TerminalSession): string {
+  const were = wereLive
+    .filter((w) => w.id !== orch.id)
+    .map((w) => ({ w, s: store.getSession(w.id) }))
+    .filter(({ s }) => s && s.projectId === orch.projectId && s.closedAt === null)
+    .map(({ w, s }) => `- ${s!.title}: was ${w.status}`)
+  return [
+    'Garden restarted and every card on this board went down. You came back because you were on.',
+    were.length ? 'These were running and are off now:' : 'No other card on this board was running.',
+    ...were,
+    `Read ${join(mailDirFor(orch.id), 'BOARD.md')} and your TODO.md, then decide. Start the cards whose work is unfinished, and`,
+    'leave off any with nothing to do. A card turned on reopens its own conversation.',
+  ].join('\n')
+}
+
 function revive() {
-  if (process.env.GARDEN_REVIVE !== '1') {
-    if (wereLive.length) {
-      console.log(
-        `[garden] ${wereLive.length} card${wereLive.length === 1 ? ' was' : 's were'} running and stay off; ` +
-          'turn on an orchestrator and it turns on the cards it needs',
-      )
-    }
-    return
+  const onlyOrchestrators = process.env.GARDEN_REVIVE !== '1'
+  if (onlyOrchestrators) {
+    console.log(`[garden] ${wereLive.length} card${wereLive.length === 1 ? ' was' : 's were'} running; the orchestrators among them come back`)
   }
   const skipped = wereLive.filter((w) => !WORTH_REVIVING.has(w.status)).length
   if (skipped) {
@@ -10482,6 +10709,7 @@ function revive() {
     .filter((w) => WORTH_REVIVING.has(w.status))
     .map((w) => store.getSession(w.id))
     .filter((s): s is TerminalSession => !!s && s.kind === 'session' && s.closedAt === null)
+    .filter((s) => !onlyOrchestrators || (s.roleClass === 'orchestrator' && !pilotHeld(s.projectId)))
   if (!cards.length) return
   console.log(
     cards.length === 1
@@ -10547,6 +10775,7 @@ function revive() {
   const next = () => {
     const s = cards[i++]
     if (!s) return
+    if (onlyOrchestrators) fileMail(s, 'Garden', backAfterRestartNote(s), { kind: 'work', taskId: 'board' })
     startOne(s.id, false)
     if (i < cards.length) setTimeout(next, APART_MS).unref?.()
   }

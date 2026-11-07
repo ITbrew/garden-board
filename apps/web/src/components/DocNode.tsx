@@ -56,6 +56,9 @@ export type DocNodeData = {
 /** A markdown file pinned to the canvas, readable and editable in place. */
 export const DocNode = memo(function DocNode({ data, selected }: NodeProps) {
   const { card, project, width, height } = data as DocNodeData
+  // Expanded, a file in a web fills its frame and is not resized by hand. Canon 04.
+  const isWebFile = (card.web === 'context' || card.web === 'history') && !!card.ownerId
+  const inWeb = (card.web === 'context' || card.web === 'history') && !!card.ownerId && card.size !== 'normal'
   const [, bump] = useState(0)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
@@ -244,7 +247,7 @@ export const DocNode = memo(function DocNode({ data, selected }: NodeProps) {
      */
     <>
       <NodeResizer
-        isVisible={!card.collapsed}
+        isVisible={!card.collapsed && !inWeb}
         minWidth={200}
         minHeight={120}
         lineClassName="card-resize-line"
@@ -420,7 +423,7 @@ export const DocNode = memo(function DocNode({ data, selected }: NodeProps) {
         {/* Minimize, not close. Removing a card is right-click, Delete, and a confirmation. */}
         <button
           className="twisty nodrag"
-          title="Bigger: working size, then the whole workspace"
+          title={isWebFile ? (card.size === 'normal' ? 'Fill the box this file is in' : 'Back to its own size') : 'Bigger: working size, then the whole workspace'}
           onClick={() => actions.cycleDocSize(card.id, 1)}
         >
           ⤢

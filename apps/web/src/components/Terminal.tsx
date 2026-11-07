@@ -28,7 +28,28 @@ export function Terminal({ sessionId, live }: { sessionId: string; live: boolean
     const entry = acquire(sessionId)
     entry.term.options.disableStdin = !live
     entry.term.options.cursorBlink = live
-    if (live) requestAnimationFrame(() => entry.term.focus())
+    if (!live) return
+    /*
+     * A card just turned on has to hear how big this pane is, because nothing else is sure to say so.
+     * While it was off this pane reported nothing, the new process starts at the size last recorded
+     * for the card, and the ResizeObserver only speaks if the box changes. The snapshot path usually
+     * covers it, but not after a page reload, when both sides stand at sequence 0 and the snapshot is
+     * dropped as nothing new. The process then draws for rows this pane does not have. Canon 03.
+     *
+     * `actions.resize` drops a repeat, so a pane that already reported costs nothing here.
+     */
+    const frame = requestAnimationFrame(() => {
+      entry.term.focus()
+      const container = ref.current
+      if (!container || container.clientHeight <= 0 || container.clientWidth <= 0) return
+      try {
+        entry.fit.fit()
+        actions.resize(sessionId, entry.term.cols, entry.term.rows)
+      } catch {
+        // Not laid out yet. The ResizeObserver reports when it is.
+      }
+    })
+    return () => cancelAnimationFrame(frame)
   }, [sessionId, live])
 
   useEffect(() => {

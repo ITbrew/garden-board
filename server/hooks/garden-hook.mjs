@@ -19,7 +19,8 @@ const PORT = Number(process.env.GARDEN_PORT) || 5178
 const TIMEOUT_MS = 1200
 
 /**
- * What this process will say on the way out. An empty object everywhere except SessionStart.
+ * What this process will say on the way out. An empty object except for SessionStart, an owner's
+ * message to an orchestrator, and a refused tool call.
  *
  * An empty JSON object is "no decision, carry on", which is exactly what an observer should say.
  * Silence means the same thing on paper, but PreToolUse has shipped at least one build that
@@ -1021,6 +1022,15 @@ function sessionStartContext() {
   return parts.join('\n').slice(0, 9600)
 }
 
+/**
+ * How Garden words a notice of mail when it types one into a card. See `server/src/index.ts`. The CLI
+ * reads that typing as a paste and can wrap it in a tag, so the tag is allowed for.
+ */
+const WIRE_MAIL = /^(<pasted_content[^>]*>\s*)?(A message|\d+ messages) arrived on (one of )?your wires/
+const GOAL_RING_REMINDER =
+  "Garden reminder: if this work starts, moves or finishes a goal, update this project's TODO.md " +
+  'as part of it, so the tab\'s goal ring stays true (skill goal-ring). If nothing moved, ignore this.'
+
 let raw = ''
 process.stdin.setEncoding('utf8')
 process.stdin.on('data', (d) => {
@@ -1066,6 +1076,22 @@ process.stdin.on('end', () => {
         hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context },
       })
     }
+  }
+
+  /*
+   * Each message from the owner to an orchestrator carries a reminder to keep the goal ring true.
+   * Canon 26. The role file asks once, at the start of a session, and a long session forgets. Mail
+   * from other cards reaches a card as a typed prompt too, and is left out: the owner asked for this
+   * on his own messages, and a check-in every few minutes should not repeat it.
+   */
+  if (
+    event.hook_event_name === 'UserPromptSubmit' &&
+    process.env.GARDEN_ROLE === 'orchestrator' &&
+    !WIRE_MAIL.test(String(event.prompt ?? '').trimStart())
+  ) {
+    output = JSON.stringify({
+      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: GOAL_RING_REMINDER },
+    })
   }
 
   if (event.hook_event_name === 'PreToolUse') {

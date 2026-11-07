@@ -296,7 +296,7 @@ export function Sidebar({ onFold }: { onFold?: () => void }) {
         frequency of checking in minutes."
       */}
       {active && (
-        <section className="rail-section">
+        <section className="rail-section rail-loops">
           {/* The title belongs to the panel rather than to this file, because it folds and the
               panel is what remembers whether it is folded. */}
           <LoopsPanel

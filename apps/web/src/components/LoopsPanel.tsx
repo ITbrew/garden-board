@@ -63,13 +63,14 @@ function LoopRow({ projectId, loop, cards }: { projectId: string; loop: CardLoop
   // A server older than the count does not send one, and a rail served by Vite is newer than the
   // backend for as long as it takes the owner to relaunch. Zero, rather than "undefined runs".
   const runs = loop.runs ?? 0
-  const save = (patch: Partial<Pick<CardLoop, 'minutes' | 'prompt' | 'enabled'>>) => {
+  const save = (patch: Partial<Pick<CardLoop, 'minutes' | 'prompt' | 'enabled' | 'followsRing'>>) => {
     actions.setLoop(projectId, {
       id: loop.id,
       sessionId: loop.sessionId,
       prompt: loop.prompt,
       minutes: loop.minutes,
       enabled: loop.enabled,
+      followsRing: loop.followsRing,
       ...patch,
     })
   }
@@ -90,7 +91,10 @@ function LoopRow({ projectId, loop, cards }: { projectId: string; loop: CardLoop
     if (p !== loop.prompt) save({ prompt: p })
   }
 
-  const last = loop.lastOutcome === 'typed' && loop.lastFiredAt
+  const left = /^typed: (.*)$/.exec(loop.lastOutcome ?? '')?.[1]
+  const last = left
+    ? left
+    : loop.lastOutcome === 'typed' && loop.lastFiredAt
     ? `typed ${new Date(loop.lastFiredAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
     : loop.lastOutcome ?? (loop.enabled ? 'waiting for the card' : 'off')
 
@@ -148,6 +152,10 @@ function LoopRow({ projectId, loop, cards }: { projectId: string; loop: CardLoop
           }}
         />
         minutes
+      </label>
+      <label className="rail-loop__ring" title="Runs while this tab's goal ring has goals left, and closes when it is full">
+        <input type="checkbox" checked={loop.followsRing} onChange={(e) => save({ followsRing: e.target.checked })} />
+        Until the ring is full
       </label>
       <textarea
         className="rail-loop__prompt"
@@ -241,6 +249,12 @@ export function LoopsPanel({
 }) {
   const [adding, setAdding] = useState<string>('')
   const [open, setOpen] = useState(() => folded().section !== true)
+  // The rings tutorial opens this section to show the loops (canon 23).
+  useEffect(() => {
+    const show = () => setOpen(true)
+    window.addEventListener('garden:open-loops', show)
+    return () => window.removeEventListener('garden:open-loops', show)
+  }, [])
   const unlooped = cards.filter((c) => !loops.some((l) => l.sessionId === c.id))
   const running = loops.filter((l) => l.enabled).length
 

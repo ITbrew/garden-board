@@ -26,7 +26,7 @@ live only after the backend restarts, which ends every session on the board.
 There are two routes and they produce the same thing.
 
 **From the board.** Right-click empty canvas. The menu makes a session card, a document card, a web,
-or a To Do card. This is the owner's route and it needs no shell.
+or a markdown file. This is the owner's route and it needs no shell.
 
 **From inside a session**, which is the route an orchestrator uses:
 

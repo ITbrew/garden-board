@@ -1,0 +1,555 @@
+/* The goal ring. Canon 26. */
+
+.canvas-flow {
+  position: relative;
+}
+
+/* In the board's viewport, so left and top are board coordinates and it pans and zooms with the cards. */
+.goal-ring {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1000;
+  pointer-events: none;
+  color: #f2f3f6;
+}
+
+.goal-ring button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.goal-ring button:focus-visible {
+  outline: 1px solid #ffffff;
+  outline-offset: 3px;
+}
+
+/* --- minimized --- */
+
+.goal-ring__blip-wrap {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.goal-ring__grip {
+  display: none;
+  position: absolute;
+  z-index: 1;
+  cursor: nwse-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.goal-ring__grip svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.goal-ring__grip path {
+  fill: none;
+  stroke: #8f86b8;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.goal-ring__grip:hover path {
+  stroke: #e2d0ff;
+}
+
+.goal-ring__open:hover .goal-ring__grip {
+  display: block;
+}
+
+.goal-ring .goal-ring__blip {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.goal-ring__blip svg {
+  display: block;
+  overflow: visible;
+}
+
+.goal-ring__blip-count {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 300;
+  pointer-events: none;
+}
+
+/* --- the frame and rings --- */
+
+/* Only a dark backing, so the rings read over the board. It has no outline. */
+.goal-ring__frame {
+  fill: #06070a;
+}
+
+.goal-ring__mini-empty {
+  fill: none;
+  stroke: #2f2a55;
+  stroke-width: 5;
+  stroke-dasharray: 6 8;
+}
+
+.goal-ring__mini-bar,
+.goal-ring__bar {
+  fill: none;
+  stroke-linecap: round;
+}
+
+.goal-ring__hit {
+  fill: none;
+  stroke: transparent;
+}
+
+.goal-ring__seg {
+  cursor: pointer;
+}
+
+.goal-ring__mini-bar.is-done,
+.goal-ring__bar.is-done {
+  stroke: #7c5cff;
+}
+
+.goal-ring__mini-bar.is-doing,
+.goal-ring__bar.is-doing {
+  stroke: #e2d0ff;
+  filter: drop-shadow(0 0 6px rgba(186, 160, 255, 0.95));
+}
+
+.goal-ring__mini-bar.is-next,
+.goal-ring__bar.is-next {
+  stroke: #2f2a55;
+}
+
+.goal-ring__bar.is-next.is-active {
+  stroke: #4d4585;
+}
+
+.goal-ring__lead {
+  fill: none;
+  stroke: #5b5f73;
+}
+
+.goal-ring__lead.is-active {
+  stroke: #868c9c;
+}
+
+.goal-ring__seg:focus {
+  outline: none;
+}
+
+/* --- open --- */
+
+.goal-ring__open {
+  position: absolute;
+  display: flex;
+}
+
+.goal-ring__drawing {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+
+.goal-ring__notes {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 300px;
+}
+
+.goal-ring__notes .goal-ring__note {
+  position: static;
+}
+
+.goal-ring__note {
+  position: absolute;
+  z-index: 2;
+  width: 300px;
+  max-height: 300px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  box-sizing: border-box;
+  color: #c9cdd8;
+  font-size: 13px;
+  line-height: 1.4;
+  text-shadow: 0 0 2px #0a0b12, 0 0 6px #0a0b12, 0 0 12px #0a0b12;
+  pointer-events: auto;
+  cursor: default;
+}
+
+.goal-ring__note--hint {
+  z-index: 3;
+  pointer-events: none;
+}
+
+.goal-ring__note h3 {
+  margin: 0;
+  color: #a4a9b6;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.goal-ring__note h3.is-done { color: #a48fff; }
+.goal-ring__note h3.is-doing { color: #e2d0ff; }
+
+.goal-ring__note p {
+  margin: 6px 0 0;
+}
+
+.goal-ring__section-owner {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #868c9c;
+}
+
+/* Round, so a press in the corners of its box reaches the board. */
+.goal-ring__disc {
+  position: relative;
+  cursor: grab;
+  user-select: none;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+/* Only what is drawn takes a press, so the corners of the square belong to the board. */
+.goal-ring__disc .goal-ring__frame,
+.goal-ring__disc .goal-ring__seg {
+  pointer-events: auto;
+}
+
+.goal-ring__disc svg {
+  display: block;
+  overflow: visible;
+}
+
+.goal-ring__disc svg .goal-ring__seg {
+  pointer-events: auto;
+}
+
+/* The minimize button, and it fills the inner ring (radius 80) without reaching its bars. */
+.goal-ring .goal-ring__center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 140px;
+  height: 140px;
+  box-sizing: border-box;
+  padding: 0 14px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+  pointer-events: auto;
+}
+
+.goal-ring .goal-ring__center:hover {
+  background: rgba(124, 92, 255, 0.14);
+}
+
+.goal-ring__count {
+  font-size: 38px;
+  font-weight: 200;
+  letter-spacing: -2px;
+  line-height: 1.05;
+}
+
+.goal-ring__count small {
+  font-size: 15px;
+  letter-spacing: 0;
+  color: #868c9c;
+}
+
+.goal-ring__panel {
+  position: relative;
+  flex: none;
+  width: 280px;
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 14px 14px 14px 4px;
+  border-radius: 0 14px 14px 0;
+  background: #06070a;
+  border: 1px solid #2a3352;
+  border-left: 0;
+  pointer-events: auto;
+  font-size: 13px;
+}
+
+.goal-ring__panel--empty {
+  position: absolute;
+  width: 260px;
+  height: auto;
+  padding: 20px 22px;
+  border: 1px solid #2a3352;
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.goal-ring__panel h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 300;
+  letter-spacing: -0.5px;
+  line-height: 1.2;
+}
+
+.goal-ring__panel--empty h2 {
+  padding-right: 0;
+}
+
+.goal-ring__panel p {
+  margin: 0;
+  line-height: 1.5;
+  color: #a4a9b6;
+}
+
+.goal-ring .goal-ring__create {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 6px;
+  background: #e8ebf2;
+  color: #06070a;
+  font-weight: 500;
+}
+
+.goal-ring .goal-ring__close-text {
+  color: #a4a9b6;
+  min-height: 28px;
+}
+
+.goal-ring .goal-ring__row {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.goal-ring__row svg {
+  flex: none;
+  color: #868c9c;
+  transition: transform 0.15s;
+}
+
+.goal-ring__row svg.is-open {
+  transform: rotate(180deg);
+}
+
+.goal-ring__row.is-active .goal-ring__row-label {
+  color: #ffffff;
+  font-weight: 500;
+}
+
+.goal-ring__row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #a4a9b6;
+}
+
+.goal-ring__row-label.is-done { color: #a48fff; }
+.goal-ring__row-label.is-doing { color: #e2d0ff; }
+
+.goal-ring__dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 1px solid #4d4585;
+}
+
+.goal-ring__dot.is-done { background: #7c5cff; border-color: #7c5cff; }
+.goal-ring__dot.is-doing { background: #e2d0ff; border-color: #e2d0ff; }
+
+.goal-ring__panel .goal-ring__done-when {
+  color: #a4a9b6;
+}
+
+.goal-ring__leaders {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.goal-ring .goal-ring__name {
+  position: absolute;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 15px;
+  line-height: 1;
+  text-shadow: 0 0 2px #0a0b12, 0 0 6px #0a0b12, 0 0 12px #0a0b12;
+  white-space: nowrap;
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.goal-ring .goal-ring__name .goal-ring__row-label {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.goal-ring .goal-ring__name.is-part {
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+.goal-ring .goal-ring__name:hover,
+.goal-ring .goal-ring__name.is-picked {
+  background: none;
+  opacity: 1;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+/* Paused, disabled or stuck: dimmer, so it reads as held at a glance. Canon 25. */
+.goal-ring__blip-wrap.is-held,
+.goal-ring__open.is-held .goal-ring__disc {
+  opacity: 0.5;
+}
+
+/* The rings tutorial. Canon 23. */
+.tour-spot {
+  outline: 2px solid #a48fff;
+  outline-offset: 4px;
+  box-shadow: 0 0 24px rgba(164, 143, 255, 0.55);
+  border-radius: 8px;
+}
+
+.goal-ring__disc.tour-spot,
+.goal-ring__blip-wrap.tour-spot {
+  border-radius: 50%;
+}
+
+/* An arc is drawn, so it is lit rather than outlined. */
+.goal-ring__seg.tour-spot {
+  outline: none;
+  box-shadow: none;
+}
+
+.goal-ring__seg.tour-spot .goal-ring__bar {
+  stroke: #e2d0ff;
+  filter: drop-shadow(0 0 10px #a48fff);
+}
+
+.ctxmenu__item.tour-spot {
+  outline-offset: -2px;
+  box-shadow: none;
+  border-radius: 4px;
+}
+
+.rings-tour__wire {
+  position: fixed;
+  inset: 0;
+  z-index: 69;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+}
+
+.rings-tour__wire polyline {
+  fill: none;
+  stroke: #a48fff;
+  stroke-width: 1;
+}
+
+.rings-tour {
+  position: fixed;
+  right: 16px;
+  bottom: 150px;
+  z-index: 70;
+  box-sizing: border-box;
+  width: min(300px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid #4a3f8f;
+  border-radius: 10px;
+  background: #0b0d16;
+  color: #c9cdd8;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.rings-tour h2 {
+  margin: 4px 0 6px;
+  color: #e2d0ff;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.rings-tour p {
+  margin: 0 0 8px;
+}
+
+.rings-tour__count {
+  color: #868c9c;
+  font-size: 11px;
+}
+
+.rings-tour__state {
+  color: #868c9c;
+}
+
+.rings-tour__state.is-on {
+  color: #a48fff;
+}
+
+.rings-tour__row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.rings-tour button {
+  padding: 4px 12px;
+  border: 1px solid #2a3352;
+  border-radius: 6px;
+  background: none;
+  color: #a4a9b6;
+  cursor: pointer;
+}
+
+.rings-tour button.is-next {
+  border-color: #7c5cff;
+  background: #1c1740;
+  color: #e2d0ff;
+}
+
+/* The goal a sub-goal belongs to, above its title. Canon 26. */
+.goal-ring__note .goal-ring__parent {
+  margin: 0 0 2px;
+  color: #868c9c;
+}

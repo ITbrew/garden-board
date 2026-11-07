@@ -192,6 +192,8 @@ export { getPreviewLines as getPreview, onPreviewChange } from './preview'
 // Document text, kept out of React state for the same reason as terminal bytes: a card's body
 // changing should not re-render the canvas.
 const docContent = new Map<string, string>()
+/** Each tab's list as the goal ring reads it: null when the project has none. Canon 26. */
+const goalTexts = new Map<string, string | null>()
 const docMtime = new Map<string, number>()
 const docSubs = new Set<() => void>()
 
@@ -668,6 +670,10 @@ export function onAgentChat(fn: (sessionId: string) => void) {
   }
 }
 
+export function getGoalText(projectId: string): string | null | undefined {
+  return goalTexts.get(projectId)
+}
+
 export function getDocContent(cardId: string): string | undefined {
   return docContent.get(cardId)
 }
@@ -1016,6 +1022,12 @@ conn.on((msg: ServerMessage) => {
       for (const fn of docSubs) fn()
       return
     }
+    case 'goal.text': {
+      if (goalTexts.get(msg.projectId) === msg.text) return
+      goalTexts.set(msg.projectId, msg.text)
+      for (const fn of docSubs) fn()
+      return
+    }
     case 'doc.content': {
       if (msg.mtime) docMtime.set(msg.cardId, msg.mtime)
       docContent.set(msg.cardId, msg.error ? `Could not read this file.
@@ -1099,6 +1111,8 @@ function focusFor(projectId: string | null, sessions: TerminalSession[]): string
   const alive = new Set(sessions.filter((s) => s.projectId === projectId && s.closedAt === null).map((s) => s.id))
   return (rememberedFocus()[projectId] ?? []).filter((id) => alive.has(id)).slice(-MAX_FOCUSED)
 }
+
+const webFilesFoldedToExpand = new Set<string>()
 
 export const actions = {
   setActiveProject(id: string) {
@@ -1495,6 +1509,14 @@ export const actions = {
     conn.send({ t: 'doc.open', projectId, relPath })
   },
 
+  readGoal(projectId: string) {
+    conn.send({ t: 'goal.read', projectId })
+  },
+
+  createGoal(projectId: string) {
+    conn.send({ t: 'goal.create', projectId })
+  },
+
   readDoc(cardId: string) {
     conn.send({ t: 'doc.read', cardId })
   },
@@ -1828,7 +1850,11 @@ export const actions = {
   listLoops(projectId: string) {
     conn.send({ t: 'loop.list', projectId })
   },
-  setLoop(projectId: string, loop: { id?: string; sessionId: string; prompt: string; minutes: number; enabled: boolean }) {
+  ringControl(projectId: string, op: 'start' | 'pause' | 'disable') {
+    conn.send({ t: 'ring.control', projectId, op })
+  },
+
+  setLoop(projectId: string, loop: { id?: string; sessionId: string; prompt: string; minutes: number; enabled: boolean; followsRing?: boolean }) {
     conn.send({ t: 'loop.set', projectId, loop })
   },
   deleteLoop(projectId: string, id: string) {
@@ -2034,11 +2060,17 @@ export const actions = {
 
   cycleDocSize(cardId: string, direction: 1 | -1) {
     const d = state.docs.find((x) => x.id === cardId)
-    const order = ['normal', 'large', 'full'] as const
+    // A file in a web has two sizes, its own and its frame's (canon 04).
+    const inWeb = !!d?.ownerId && (d.web === 'context' || d.web === 'history')
+    const order: readonly ('normal' | 'large' | 'full')[] = inWeb ? ['normal', 'large'] : ['normal', 'large', 'full']
     const current = d?.size ?? 'normal'
     const i = Math.max(0, order.indexOf(current))
     const next = order[(i + direction + order.length) % order.length]!
+    // The server unfolds a file it enlarges, so one that was folded in its column is folded again on the way back.
+    if (inWeb && next !== 'normal' && d?.collapsed) webFilesFoldedToExpand.add(cardId)
+    const refold = inWeb && next === 'normal' && webFilesFoldedToExpand.delete(cardId)
     conn.send({ t: 'doc.setSize', cardId, size: next })
+    if (refold) conn.send({ t: 'doc.setCollapsed', cardId, collapsed: true })
     record({
       label: direction > 0 ? 'expand card' : 'shrink card',
       undo: () => conn.send({ t: 'doc.setSize', cardId, size: current }),

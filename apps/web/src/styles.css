@@ -839,89 +839,6 @@ body {
 }
 .twisty:hover { color: var(--text); }
 
-/*
- * The to-do bar, above a card rather than inside it.
- *
- * Owner: "make the task bar outside above the card instead of in the text section. similar to how
- * context bar exists but horizontally above for to-do list." So it is laid out like a column header
- * and not like a card: one line, the card's own width, nothing that can be dragged or selected.
- *
- * The track is drawn at zero as well as at full, because a progress bar that appears only once
- * something is done cannot be told apart from a list nobody has started.
- */
-.todobar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--bg-raised);
-  font-size: 10.5px;
-  color: var(--text-dim);
-  overflow: hidden;
-  white-space: nowrap;
-}
-.todobar--main { border-color: #2b3a4f; }
-.todobar__track {
-  flex: 0 0 62px;
-  height: 5px;
-  border-radius: 999px;
-  background: var(--line);
-  overflow: hidden;
-}
-.todobar__fill {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--accent);
-  transition: width 160ms ease-out;
-}
-.todobar__fill.is-all { background: var(--ok); }
-.todobar__count { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--text-faint); }
-/*
- * Says what the fraction counts, so the chip beside it reads as the remainder rather than as a
- * second, contradictory list.
- *
- * It never shrinks. It was allowed to, on the reasoning that a word is the cheapest thing to lose,
- * and a blind reader got "0/2 do…" for its trouble: a truncated word is worse than no word, because
- * it takes the space and returns nothing. The item chip is what absorbs a narrow bar now, and it can
- * afford to, since it ends in an ellipsis on purpose and its full text is on its tooltip.
- */
-.todobar__word { flex: 0 0 auto; color: var(--text-faint); }
-/* Each open item, and clicking one ticks it off in the file. */
-.todobar__item {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 2px 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  cursor: pointer;
-}
-.todobar__item:hover { color: var(--text); border-color: var(--accent); }
-.todobar__more { flex: 0 0 auto; color: var(--text-faint); }
-.todobar__done { flex: 0 0 auto; color: var(--ok); }
-.todobar__loop,
-.todobar__looping { flex: 0 0 auto; margin-left: auto; }
-.todobar__loop {
-  padding: 2px 8px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  cursor: pointer;
-}
-.todobar__loop:hover { color: var(--text); border-color: var(--accent); }
-.todobar__looping { color: var(--ok); text-transform: uppercase; letter-spacing: 0.05em; font-size: 9.5px; }
-
 .node--doc { border-color: #1d2a3a; }
 .node-head--doc { background: #101826; }
 .doc-icon {
@@ -3512,4 +3429,13 @@ button.port-dot {
 .rail-limit-row.is-count output {
   width: 52px; flex: 0 0 auto; padding: 4px 6px; text-align: right;
   font: 12px/1.2 'Cascadia Mono', Consolas, monospace; color: var(--text);
+}
+
+/* Canon 25. */
+.rail-loop__ring {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted, #868c9c);
 }

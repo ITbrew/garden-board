@@ -32,7 +32,7 @@ const PORT = Number(process.env.GARDEN_PORT) || 5178
 // Read, never printed. A hello that proves nothing is a guest, and a guest cannot press this.
 let key
 try {
-  key = readFileSync(join(homedir(), '.garden', 'owner.key'), 'utf8').trim()
+  key = readFileSync(join(process.env.GARDEN_HOME || join(homedir(), '.garden'), 'owner.key'), 'utf8').trim()
 } catch (e) {
   console.log(`no owner key to send: ${e.code ?? ''} ${String(e.message).split('\n')[0]}`.trim())
   console.log('The server writes it as it starts. Without it this connects as a guest, and a guest')

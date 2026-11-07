@@ -72,7 +72,7 @@ const head = git('rev-parse', '--short=7', 'HEAD')
 say(`committed ${head}`)
 
 // 5. Restart, as the button does. No card comes back on its own.
-const key = readFileSync(join(homedir(), '.garden', 'owner.key'), 'utf8').trim()
+const key = readFileSync(join(process.env.GARDEN_HOME || join(homedir(), '.garden'), 'owner.key'), 'utf8').trim()
 const connect = () =>
   new Promise((ok, fail) => {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`)

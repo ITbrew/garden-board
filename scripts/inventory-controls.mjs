@@ -220,7 +220,7 @@ const choose = async (x, y, label, sub) => {
 }
 
 // The other kinds of card, each made the way the owner makes it, from the board's menu.
-for (const label of ['New message card', 'New role card', 'Create To Do Card', 'New markdown file']) {
+for (const label of ['New message card', 'New role card', 'New markdown file']) {
   const p = await page.evaluate(() => {
     for (let y = 150; y < 950; y += 40)
       for (let x = 400; x < 1650; x += 40)

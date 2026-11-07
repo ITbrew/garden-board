@@ -7,6 +7,7 @@
  *   garden-loop.mjs --off --card "Orchestrator"
  *   garden-loop.mjs --minutes 30 --card "Orchestrator"
  *   garden-loop.mjs --delete --card "Orchestrator"
+ *   garden-loop.mjs --on --until-ring --card "Orchestrator" --minutes 10 --prompt-file tick.md
  *
  * One loop per card is what this command manages; the rail can hold more. The prompt comes from a
  * file, never the command line, for the same reason mail bodies do: a long command cannot be
@@ -26,7 +27,7 @@ function fail(message) {
 
 const argv = process.argv.slice(2)
 const VALUED = new Set(['--card', '--minutes', '--prompt-file', '--project'])
-const BARE = new Set(['--on', '--off', '--delete', '--json'])
+const BARE = new Set(['--on', '--off', '--delete', '--json', '--until-ring'])
 const opts = {}
 for (let i = 0; i < argv.length; i++) {
   const token = argv[i]
@@ -43,7 +44,7 @@ for (let i = 0; i < argv.length; i++) {
   opts[token] = value
 }
 if (opts['--on'] && opts['--off']) fail('--on and --off together say nothing.')
-const changing = opts['--on'] || opts['--off'] || opts['--delete'] || opts['--minutes'] || opts['--prompt-file']
+const changing = opts['--on'] || opts['--off'] || opts['--delete'] || opts['--minutes'] || opts['--prompt-file'] || opts['--until-ring']
 if (changing && !opts['--card']) fail('Say which card with --card "<title>".')
 let minutes
 if (opts['--minutes'] !== undefined) {
@@ -164,6 +165,7 @@ ws.on('message', (raw) => {
         prompt: prompt ?? existing.prompt,
         minutes: minutes ?? existing.minutes,
         enabled: opts['--on'] ? true : opts['--off'] ? false : existing ? existing.enabled : true,
+        ...(opts['--until-ring'] ? { followsRing: true } : {}),
       },
     }),
   )

@@ -128,6 +128,9 @@ const all = readdirSync(HERE)
  * green and not in the suite, which is the worst of both.
  */
 if (!only || 'profiles.test.ts'.includes(only)) all.push('../server/src/profiles.test.ts')
+if (!only || 'ring-loop.test.ts'.includes(only)) all.push('../server/src/ring-loop.test.ts')
+if (!only || 'roots-shipped-skills.test.ts'.includes(only)) all.push('../server/src/roots-shipped-skills.test.ts')
+if (!only || 'slow-operations.test.ts'.includes(only)) all.push('../server/src/slow-operations.test.ts')
 
 /*
  * Tests that cannot run from this checkout at all, whatever anyone passes.
