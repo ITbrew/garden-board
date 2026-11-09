@@ -1,4 +1,5 @@
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { readFileSync, statSync, writeFileSync } from 'node:fs'
+import { readdir } from 'node:fs/promises'
 import { join, relative, resolve, sep } from 'node:path'
 
 const MAX_BYTES = 512 * 1024
@@ -26,16 +27,21 @@ export function safeJoin(projectPath: string, relPath: string): string {
   return target
 }
 
-/** Markdown files inside a project, nearest first, skipping build and dependency folders. */
-export function listMarkdown(projectPath: string): string[] {
+/**
+ * Text files inside a project, nearest first, skipping build and dependency folders.
+ *
+ * Asynchronous, one folder at a time: on 2026-11-09 the synchronous walk held the server's only
+ * thread for 3 s on a busy disk, and nothing typed to any card was read meanwhile (canon 01).
+ */
+export async function listMarkdown(projectPath: string): Promise<string[]> {
   const root = resolve(projectPath)
   const out: string[] = []
 
-  const walk = (dir: string, depth: number) => {
+  const walk = async (dir: string, depth: number): Promise<void> => {
     if (out.length >= MAX_RESULTS || depth > 6) return
     let entries: import('node:fs').Dirent<string>[]
     try {
-      entries = readdirSync(dir, { withFileTypes: true, encoding: 'utf8' })
+      entries = await readdir(dir, { withFileTypes: true, encoding: 'utf8' })
     } catch {
       return
     }
@@ -45,7 +51,7 @@ export function listMarkdown(projectPath: string): string[] {
       const full = join(dir, e.name)
       if (e.isDirectory()) {
         if (SKIP_DIRS.has(e.name)) continue
-        walk(full, depth + 1)
+        await walk(full, depth + 1)
       // Any text file worth putting on the board, not only markdown. Restricting this to .md
       // meant a .ts, .json or .py could not be opened by hand at all, on a tool whose job
       // includes editing the files a session works with.
@@ -60,7 +66,7 @@ export function listMarkdown(projectPath: string): string[] {
     }
   }
 
-  walk(root, 0)
+  await walk(root, 0)
   // Shallow paths first, so CLAUDE.md and AGENTS.md surface above deep canon docs.
   out.sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b))
   return out

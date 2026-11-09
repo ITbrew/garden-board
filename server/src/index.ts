@@ -43,7 +43,7 @@ import { ensureMemory, memoryDirFor, writeCardBrief } from './memory.js'
 import { Watchdog } from './watchdog.js'
 import { boardMarkdown, openTodos, readPrompt, since } from './pilot.js'
 import { parseGoal } from '@garden/shared/goals'
-import { ringLoopStep } from './ring-loop.js'
+import { ringLoopStep, ringTurnsCardsOff } from './ring-loop.js'
 import { clearUnreadMarker, mailDirFor, postMessage, recordSent, unreadInline, writePeers, writePowers, writeUnreadMarker, type Peer } from './mail.js'
 import { hasSubstance, historyDirFor, stamp, writeAgentHistory, writeHistory } from './history.js'
 import { readFile as readFilePromise, writeFile as writeFilePromise } from 'node:fs/promises'
@@ -5851,7 +5851,7 @@ function handle(ws: WebSocket, msg: ClientMessage) {
     case 'doc.list': {
       const project = store.getProject(msg.projectId)
       if (!project) return fail(ws, 'unknown project', msg.t)
-      send(ws, { t: 'doc.list', projectId: project.id, files: listMarkdown(project.path) })
+      void listMarkdown(project.path).then((files) => send(ws, { t: 'doc.list', projectId: project.id, files }))
       return
     }
 
@@ -5976,7 +5976,7 @@ function handle(ws: WebSocket, msg: ClientMessage) {
       }
       store.upsertDoc(card)
       broadcast({ t: 'doc.added', card })
-      send(ws, { t: 'doc.list', projectId: project.id, files: listMarkdown(project.path) })
+      void listMarkdown(project.path).then((files) => send(ws, { t: 'doc.list', projectId: project.id, files }))
       return
     }
 
@@ -10401,7 +10401,7 @@ function ringLoopTurn(loop: CardLoop, now: number, touched: Set<string>): { left
   const seen = ringFires.get(loop.id)
   const stopWith = (stoppedBy: 'ring' | 'stuck', lastOutcome: string) => {
     store.setLoop({ ...loop, enabled: false, stoppedBy, lastOutcome })
-    ringClosing.set(loop.projectId, now)
+    if (ringTurnsCardsOff(stoppedBy)) ringClosing.set(loop.projectId, now)
     touched.add(loop.projectId)
   }
   const step = ringLoopStep({

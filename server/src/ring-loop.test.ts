@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { RING_STUCK_AFTER, ringLoopStep, type RingLoopFacts } from './ring-loop.js'
+import { RING_STUCK_AFTER, ringLoopStep, ringTurnsCardsOff, type RingLoopFacts } from './ring-loop.js'
 
 const running: RingLoopFacts = { enabled: true, stoppedBy: null, left: 2, total: 6, listChanged: false, firesUnchanged: 0, anyWorking: false }
 
@@ -39,6 +39,11 @@ test('a paused loop waits for the list to change', () => {
   const paused = { ...running, enabled: false, stoppedBy: 'stuck' as const }
   assert.equal(ringLoopStep(paused), 'stay-stopped')
   assert.equal(ringLoopStep({ ...paused, listChanged: true }), 'resume')
+})
+
+test('only a full ring turns cards off', () => {
+  assert.equal(ringTurnsCardsOff('ring'), true)
+  assert.equal(ringTurnsCardsOff('stuck'), false)
 })
 
 test('a disabled loop stays off, even with goals left and a changed list', () => {

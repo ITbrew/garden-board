@@ -26,6 +26,11 @@ export type RingLoopFacts = {
 
 export type RingLoopStep = 'carry-on' | 'finish' | 'pause' | 'resume' | 'stay-stopped'
 
+/** Only a full ring turns cards off. A pause knows the list did not change, not that nothing is running. */
+export function ringTurnsCardsOff(stoppedBy: 'ring' | 'stuck'): boolean {
+  return stoppedBy === 'ring'
+}
+
 export function ringLoopStep(f: RingLoopFacts): RingLoopStep {
   if (f.enabled) {
     if (f.left === 0) return 'finish'

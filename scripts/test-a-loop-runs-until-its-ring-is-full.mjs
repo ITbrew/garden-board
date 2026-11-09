@@ -98,6 +98,16 @@ check('stopped by hand', loop()?.enabled === false && loop()?.stoppedBy === 'own
 await sleep(25000)
 check('it stays stopped with goals still left', loop()?.enabled === false, JSON.stringify(loop()))
 
+// Three passes that change nothing: the loop pauses, and every card stays as it is.
+send({ t: 'session.start', sessionId: other.id })
+await until(() => status.get(other.id) === 'idle', 20)
+set({ enabled: true })
+await until(() => loop()?.stoppedBy === 'stuck', 330)
+check('a list nothing moves pauses the loop', loop()?.stoppedBy === 'stuck', JSON.stringify(loop()))
+await sleep(150000)
+check('the worker stays on', ['idle', 'working'].includes(status.get(other.id)), status.get(other.id))
+check('and so does the orchestrator', ['idle', 'working'].includes(liveNow()), liveNow())
+
 await board.stop()
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`)
 process.exit(failures === 0 ? 0 : 1)

@@ -38,7 +38,7 @@ small round of goals, work it, and let the owner look when the ring fills.
 - **Goals left:** the loop runs, whatever the number of goals, and wakes you if you are off.
 - **Every goal done:** the loop closes and the cards turn off.
 - **New goals on a finished ring:** the loop starts again.
-- **Three passes that change nothing, with no card working:** the loop pauses and the cards turn off. Any edit to
+- **Three passes that change nothing, with no card working:** the loop pauses and every card stays as it is. Any edit to
   `TODO.md` starts it again. So write goals cards can finish alone, and take what only the owner can decide to them
   in chat.
 - **Half-typed text:** no automatic line is typed while the owner is part way through a line.
