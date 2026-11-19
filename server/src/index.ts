@@ -6514,6 +6514,9 @@ function handle(ws: WebSocket, msg: ClientMessage) {
           }
           store.upsertWire(wire)
           broadcast({ t: 'wire.added', wire })
+        // A choice made here outranks any older /model or /effort line in the transcript (canon 03).
+        modelChoiceAt: msg.modelChoice === undefined || msg.modelChoice === s.modelChoice ? s.modelChoiceAt : Date.now(),
+        effortChoiceAt: msg.effortChoice === undefined || msg.effortChoice === s.effortChoice ? s.effortChoiceAt : Date.now(),
         }
         refreshMail(s.id)
         if (oldParent) refreshMail(oldParent)
@@ -10611,7 +10614,11 @@ http.listen(port, '127.0.0.1', () => {
     console.log('[garden] no built app found, so the UI is wherever Vite is serving it')
   }
   if (process.env.GARDEN_HOME) console.log(`[garden] workspace ${DATA_DIR}`)
-  revive()
+  // A /model or /effort typed in a card before the restart is its choice, so read those before any
+  // card launches (canon 03). Capped, so a slow disk delays the return by 20 s at most.
+  void Promise.race([ingest.adoptTerminalChoices(), new Promise((r) => setTimeout(r, 20000).unref?.())])
+    .catch(() => {})
+    .finally(() => revive())
   // Every card once after a boot, since a restart ends cards without the exit path below. Canon 30.
   setTimeout(() => {
     for (const s of store.listSessions()) if (s.kind === 'session' && s.adapterId === 'claude' && s.closedAt === null) queueRotation(s.id)

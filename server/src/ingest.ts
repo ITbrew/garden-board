@@ -27,6 +27,7 @@ import type {
 } from '@garden/shared'
 import type { Store } from './store.js'
 import { contextWindowFor } from './tokens.js'
+import { readTerminalChoice, tailLinesAsync } from './terminal-choice.js'
 
 export interface IngestDeps {
   store: Store
@@ -94,6 +95,8 @@ export interface HookBody {
 /** What a Codex card waiting on its own approval prompt shows as its reason. */
 /** How far back the first usage read reaches. Past it, the gauge waits for the next turn's own usage line. */
 const USAGE_MAX_BYTES = 16 * 1024 * 1024
+/** How far back the first read after a start looks for a /model or /effort line (canon 03). */
+const CHOICE_FIRST_BYTES = 8 * 1024 * 1024
 const CODEX_ASKING_REASON = 'Codex is asking for approval in its terminal'
 
 /** How often one card's chat is re-read from its transcript at most. See `pushChat`. */
@@ -409,6 +412,51 @@ export class Ingest {
     }
     if (claudeSessionId) return this.store.findSessionByClaudeId(claudeSessionId)
     return undefined
+  }
+
+  /**
+   * Once after a start, every card's latest /model and /effort, one card at a time, so a card that
+   * is off is launched on what the owner last chose in its terminal (canon 03).
+   */
+  async adoptTerminalChoices(): Promise<void> {
+    for (const s of this.store.listSessions()) {
+      if (s.kind !== 'session' || s.closedAt !== null) continue
+      const path = this.transcriptFor(s)
+      if (path) await this.readChoice(s.id, path, CHOICE_FIRST_BYTES)
+    }
+  }
+
+  /** A /model line seen whose reply has not been written yet, by card. */
+  private choiceWaiting = new Map<string, number>()
+  private choiceReading = new Set<string>()
+
+  /**
+   * The owner's /model or /effort in the card's own terminal becomes its saved choice (canon 03).
+   * Off the thread, one read per card at a time; a line applies only when newer than the last choice.
+   */
+  private readChoice(sessionId: string, path: string, bytes: number): Promise<void> {
+    if (this.choiceReading.has(sessionId)) return Promise.resolve()
+    this.choiceReading.add(sessionId)
+    return tailLinesAsync(path, bytes)
+      .then((lines) => {
+        const found = readTerminalChoice(lines, this.choiceWaiting.get(sessionId) ?? null)
+        if (found.modelWaiting) this.choiceWaiting.set(sessionId, found.modelWaiting.at)
+        else this.choiceWaiting.delete(sessionId)
+        const s = this.store.getSession(sessionId)
+        if (!s) return
+        const patch: Partial<TerminalSession> = {}
+        if (found.model && found.model.at > (s.modelChoiceAt ?? 0) && (found.model.id !== s.modelChoice || !s.modelChoiceAt)) {
+          patch.modelChoice = found.model.id
+          patch.modelChoiceAt = found.model.at
+        }
+        if (found.effort && found.effort.at > (s.effortChoiceAt ?? 0) && (found.effort.value !== s.effortChoice || !s.effortChoiceAt)) {
+          patch.effortChoice = found.effort.value
+          patch.effortChoiceAt = found.effort.at
+        }
+        if (Object.keys(patch).length) this.update(sessionId, patch)
+      })
+      .catch(() => {})
+      .finally(() => this.choiceReading.delete(sessionId))
   }
 
   private update(id: string, patch: Partial<TerminalSession>) {
@@ -1011,6 +1059,10 @@ export class Ingest {
      */
     const prev = this.usageReadAt.get(sessionId)
     this.usageReadAt.set(sessionId, { path, size })
+    if (session.kind === 'session' && (!prev || prev.path !== path || size !== prev.size)) {
+      const fresh = prev && prev.path === path && size > prev.size
+      void this.readChoice(sessionId, path, fresh ? size - prev.size + 64 * 1024 : CHOICE_FIRST_BYTES)
+    }
     if (prev && prev.path === path && size >= prev.size) {
       if (size === prev.size) return
       // A little overlap, since the first line of a window is dropped as partial.

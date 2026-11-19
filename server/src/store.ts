@@ -466,6 +466,8 @@ export class Store {
         effort: 'TEXT',
         modelChoice: 'TEXT',
         effortChoice: 'TEXT',
+        modelChoiceAt: 'INTEGER',
+        effortChoiceAt: 'INTEGER',
         teamSize: 'INTEGER',
         reportsTo: 'TEXT',
         fontSize: 'INTEGER',
@@ -889,10 +891,10 @@ export class Store {
     this.db.prepare(`
       INSERT INTO sessions (id,projectId,profileId,adapterId,kind,title,cwd,pid,status,waitingFor,
         statusSince,agentId,parentId,transcriptPath,claudeSessionId,
-        model,permissionMode,managed,x,y,width,height,renderState,pinned,manualPos,collapsed,color,role,size,contextUsed,tokensUsed,contextSource,roleClass,roleClassRunning,closedAt,ownedPaths,generation,canSpawnAgents,canUseTeams,subagentsAllowed,effort,modelChoice,effortChoice,teamSize,reportsTo,fontSize,bodyView,baseWidth,baseHeight,createdAt,exitedAt,exitCode)
+        model,permissionMode,managed,x,y,width,height,renderState,pinned,manualPos,collapsed,color,role,size,contextUsed,tokensUsed,contextSource,roleClass,roleClassRunning,closedAt,ownedPaths,generation,canSpawnAgents,canUseTeams,subagentsAllowed,effort,modelChoice,effortChoice,modelChoiceAt,effortChoiceAt,teamSize,reportsTo,fontSize,bodyView,baseWidth,baseHeight,createdAt,exitedAt,exitCode)
       VALUES (@id,@projectId,@profileId,@adapterId,@kind,@title,@cwd,@pid,@status,@waitingFor,
         @statusSince,@agentId,@parentId,@transcriptPath,@claudeSessionId,
-        @model,@permissionMode,@managed,@x,@y,@width,@height,@renderState,@pinned,@manualPos,@collapsed,@color,@role,@size,@contextUsed,@tokensUsed,@contextSource,@roleClass,@roleClassRunning,@closedAt,@ownedPaths,@generation,@canSpawnAgents,@canUseTeams,@subagentsAllowed,@effort,@modelChoice,@effortChoice,@teamSize,@reportsTo,@fontSize,@bodyView,@baseWidth,@baseHeight,@createdAt,@exitedAt,@exitCode)
+        @model,@permissionMode,@managed,@x,@y,@width,@height,@renderState,@pinned,@manualPos,@collapsed,@color,@role,@size,@contextUsed,@tokensUsed,@contextSource,@roleClass,@roleClassRunning,@closedAt,@ownedPaths,@generation,@canSpawnAgents,@canUseTeams,@subagentsAllowed,@effort,@modelChoice,@effortChoice,@modelChoiceAt,@effortChoiceAt,@teamSize,@reportsTo,@fontSize,@bodyView,@baseWidth,@baseHeight,@createdAt,@exitedAt,@exitCode)
       ON CONFLICT(id) DO UPDATE SET
         title=@title, cwd=@cwd, pid=@pid, status=@status, claudeSessionId=@claudeSessionId,
         waitingFor=@waitingFor, statusSince=@statusSince, agentId=@agentId, parentId=@parentId,
@@ -905,7 +907,8 @@ export class Store {
         canSpawnAgents=@canSpawnAgents,
         canUseTeams=@canUseTeams, subagentsAllowed=@subagentsAllowed,
         effort=@effort, modelChoice=@modelChoice,
-        effortChoice=@effortChoice, teamSize=@teamSize, reportsTo=@reportsTo,
+        effortChoice=@effortChoice, modelChoiceAt=@modelChoiceAt, effortChoiceAt=@effortChoiceAt,
+        teamSize=@teamSize, reportsTo=@reportsTo,
         baseWidth=@baseWidth, baseHeight=@baseHeight,
         fontSize=@fontSize, bodyView=@bodyView,
         exitedAt=@exitedAt, exitCode=@exitCode
@@ -928,6 +931,8 @@ export class Store {
       pinned: s.pinned ? 1 : 0,
       manualPos: s.manualPos ? 1 : 0,
       collapsed: s.collapsed ? 1 : 0,
+      modelChoiceAt: s.modelChoiceAt ?? null,
+      effortChoiceAt: s.effortChoiceAt ?? null,
     })
   }
 
@@ -2066,3 +2071,5 @@ function hydrateSession(row: any): TerminalSession {
     bodyView: row.bodyView === 'chat' || row.bodyView === 'terminal' ? row.bodyView : null,
   }
 }
+    modelChoiceAt: row.modelChoiceAt ?? null,
+    effortChoiceAt: row.effortChoiceAt ?? null,

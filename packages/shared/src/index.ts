@@ -387,6 +387,12 @@ export interface TerminalSession {
   modelChoice: string | null
   effortChoice: string | null
   /**
+   * When each choice was last made, in Garden or by `/model` and `/effort` in the card's own terminal.
+   * A terminal line applies only when it is newer, so an old one never overrides a later choice (canon 03).
+   */
+  modelChoiceAt?: number | null
+  effortChoiceAt?: number | null
+  /**
    * How many agents this card may have working for it at once.
    *
    * Zero is the only value the CLI enforces absolutely, by refusing the tool outright. Any other
